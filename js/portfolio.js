@@ -7,6 +7,8 @@ import { CORPORATE_ACTIONS, PUBLIC_ISSUES } from './corporate-actions.js';
 
 const EPS = 1e-6;
 
+export const ISSUE_LABEL = { rights: 'Rights issue', ipo: 'IPO allotment', transfer: 'Broker transfer', other: 'Other' };
+
 /* ---------- symbols ---------- */
 
 // Zerodha adds the trading series to some holdings symbols, e.g. GOLDBEES-E.
@@ -77,7 +79,14 @@ function applyAction(state, a) {
   const log = (pos, extra) => pos.events.push({ kind: a.type, date: a.date, ratio, note: a.note ?? '', ...extra });
 
   if (a.type === 'allot') {
-    const source = a.issue === 'ipo' ? 'IPO allotment' : 'Rights issue';
+    const source = `${ISSUE_LABEL[a.issue]}${a.party ? ` ${a.direction === 'out' ? 'to' : 'from'} ${a.party}` : ''}`;
+    if (a.direction === 'out') {
+      // A transfer moves shares and their cost away, so only a priced exit is a sale.
+      const sold = a.issue === 'other' && a.price > 0;
+      takeFifo(p, a.qty, sold ? (lot, take) => p.realized.push({ buyDate: lot.date, sellDate: a.date, qty: take, cost: lot.price, price: a.price }) : null);
+      log(p, { qty: -a.qty, price: a.price, source });
+      return;
+    }
     p.lots.push({ qty: a.qty, price: a.price, date: a.date, origin: a.symbol, source });
     p.lots.sort((x, y) => x.date.localeCompare(y.date));
     log(p, { qty: a.qty, price: a.price, source, auto: !!a.auto });
@@ -349,8 +358,8 @@ export function cleanAdjustment(x) {
   const t = Date.now();
   return {
     id: x.id, accountId: x.accountId, type: x.type, symbol: text(x.symbol, 120), date: x.date, qty: finite(x.qty),
-    avg: x.avg >= 0 && x.avg !== null ? x.avg : null, price: finite(x.price), issue: x.issue === 'ipo' ? 'ipo' : 'rights',
-    note: text(x.note), createdAt: finite(x.createdAt, t), updatedAt: finite(x.updatedAt, t),
+    avg: x.avg >= 0 && x.avg !== null ? x.avg : null, price: finite(x.price), issue: x.issue in ISSUE_LABEL ? x.issue : 'rights',
+    direction: x.direction === 'out' ? 'out' : 'in', party: text(x.party, 80), note: text(x.note), createdAt: finite(x.createdAt, t), updatedAt: finite(x.updatedAt, t),
   };
 }
 

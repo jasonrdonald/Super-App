@@ -449,6 +449,7 @@ a { color: inherit; text-decoration: none; }
 .pay-page > .btn-row { margin-bottom: 0; }
 .pf-start .btn-row { justify-content: center; }
 .holdings .lot-note td { padding-top: 0; font-size: .74rem; color: var(--muted); white-space: normal; }
+.holdings .lot-note .i { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; color: var(--good); }
 .holdings tr:has(+ .lot-note) td { border-bottom: 0; padding-bottom: 2px; }
 .pf-notes { margin: 0; padding-left: 18px; font-size: .84rem; }
 .pf-notes li + li { margin-top: 2px; }

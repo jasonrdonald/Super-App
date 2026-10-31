@@ -1,7 +1,7 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
-import { baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote, cleanMarket } from './portfolio.js';
+import { ISSUE_LABEL, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
 import { stockQuotes, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
 import { tickerFor, companyPart } from './tickers.js';
@@ -100,7 +100,7 @@ function computed(account) {
     own: A.S.portfolioActions.filter(a => a.accountId === account.id),
   });
   const lines = [...positions.values()]
-    .filter(p => p.lots.length || p.realized.length || p.dividends)
+    .filter(p => p.lots.length || p.realized.length || p.dividends || p.events.some(e => e.kind === 'allot'))
     .map(p => {
       const group = groupOf(p.symbol);
       const known = A.S.market.find(m => m.symbol === p.symbol)?.name;
@@ -598,10 +598,13 @@ function groupTable(account, rows) {
       const on = V.sort === col.key;
       return `<th${col.text ? '' : ' class="num"'} aria-sort="${on ? (V.dir > 0 ? 'ascending' : 'descending') : 'none'}"><button data-sort="${col.key}">${col.label}${on ? (V.dir > 0 ? ' ▲' : ' ▼') : ''}</button></th>`;
     }).join('')}</tr></thead>
-    <tbody>${rows.map(r => `<tr>
+    <tbody>${rows.map(r => {
+      const details = reviewDetails(account, r.symbol);
+      return `<tr>
       <th scope="row"><a href="${accountPath(account.id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(r.symbol)}</a></th>
       ${COLUMNS.slice(1).map(col => cell(col, r)).join('')}
-    </tr>`).join('')}</tbody>
+    </tr>${details ? `<tr class="lot-note"><td colspan="${COLUMNS.length}">${icon('check')}${A.esc(details)}</td></tr>` : ''}`;
+    }).join('')}</tbody>
     <tfoot><tr><th scope="row">Total</th>${COLUMNS.slice(1).map(col => (col.key in totals ? `<td class="num ${col.tone ? tone(totals[col.key]) : ''}">${col.f(totals[col.key])}</td>` : '<td></td>')).join('')}</tr></tfoot>
   </table></div>`;
 }
@@ -693,7 +696,7 @@ function eventLine(e, symbol) {
     e.note ?? '',
   ].filter(Boolean).join(' · ');
   const amount = e.kind === 'dividend' ? money(e.amount)
-    : e.kind === 'buy' || e.kind === 'sell' || e.kind === 'allot' ? money(e.qty * e.price) : '';
+    : e.kind === 'buy' || e.kind === 'sell' || e.kind === 'allot' ? money(Math.abs(e.qty) * e.price) : '';
   return { title: `${e.source ?? EVENT_LABEL[e.kind]}${ratio}${via}`, qty, flags, amount };
 }
 
@@ -712,6 +715,23 @@ const noteId = (accountId, symbol) => `${accountId}:${symbol}`;
 const noteFor = (accountId, symbol) => A.S.portfolioNotes.find(n => n.id === noteId(accountId, symbol));
 const signedQty = v => (Math.abs(v) < EPS ? '–' : `${v > 0 ? '+' : ''}${qtyText(v)}`);
 
+function entryText(f) {
+  const way = f.issue === 'transfer' || f.issue === 'other' ? (f.direction === 'out' ? ' out' : ' in') : '';
+  const party = f.party ? ` ${f.direction === 'out' ? 'to' : 'from'} ${f.party}` : '';
+  return `${ISSUE_LABEL[f.issue]}${way}${party}: ${qtyText(f.qty)} at ${money(f.price)} on ${day(f.date)}${f.note ? `. ${f.note}` : ''}`;
+}
+
+// What a reviewed holding shows under its row in the holdings table: your own
+// entries if it has any, else the system's account, then your comment.
+function reviewDetails(account, symbol) {
+  const note = noteFor(account.id, symbol);
+  if (!note?.reviewed) return '';
+  const own = A.S.portfolioActions.filter(a => a.accountId === account.id && a.type === 'allot' && a.symbol === symbol);
+  const p = computed(account).positions.get(symbol);
+  const parts = own.length ? own.map(entryText) : p ? systemNotes(p) : [];
+  return [...parts, note.comment].filter(Boolean).join(' · ') || 'Reviewed';
+}
+
 function reviewBlock(account, symbol, p) {
   const note = noteFor(account.id, symbol);
   const system = p ? systemNotes(p) : [];
@@ -720,7 +740,7 @@ function reviewBlock(account, symbol, p) {
     <div class="pf-review">
       ${note?.reviewed ? `<span class="chip paid">${icon('check')}Reviewed</span>` : '<span class="chip">Not reviewed</span>'}
       <button class="btn sm" data-act="pf-note" data-id="${account.id}" data-symbol="${A.esc(symbol)}">${icon('edit')}<span>Review</span></button>
-      ${p?.events.some(e => e.kind === 'allot') ? `<button class="btn sm" data-act="pf-allot" data-id="${account.id}" data-symbol="${A.esc(symbol)}">Override allotment</button>` : ''}
+      ${p?.events.some(e => e.kind === 'allot' && e.qty > 0 && /^(Rights|IPO)/.test(e.source)) ? `<button class="btn sm" data-act="pf-allot" data-kind="rights" data-id="${account.id}" data-symbol="${A.esc(symbol)}">Override allotment</button>` : ''}
     </div>`;
 }
 
@@ -836,8 +856,7 @@ function reconcileView(r) {
           </span></div>
           <div class="pf-actions">
             <button class="btn sm" data-act="pf-match" data-id="${account.id}" data-symbol="${A.esc(x.symbol)}"${job.running ? ' disabled' : ''}>Match broker</button>
-            <button class="btn sm" data-act="pf-allot" data-id="${account.id}" data-symbol="${A.esc(x.symbol)}">Rights / IPO</button>
-            <button class="btn sm" data-act="pf-note" data-id="${account.id}" data-symbol="${A.esc(x.symbol)}">Note</button>
+            ${[['rights', 'Rights / IPO'], ['transfer', 'Broker Transfer'], ['other', 'Other']].map(([kind, label]) => `<button class="btn sm" data-act="pf-allot" data-kind="${kind}" data-id="${account.id}" data-symbol="${A.esc(x.symbol)}">${label}</button>`).join('')}
           </div>
         </div>`).join('')}</div>
       </section>` : `<section class="panel"><h2>All holdings match</h2><p class="muted">Quantity and cost per share agree with the broker's file.</p></section>`}
@@ -846,7 +865,7 @@ function reconcileView(r) {
       </details>` : ''}
       ${fixes.length ? `<section class="panel"><h2>Your overrides (${fixes.length})</h2>
         <div class="rows">${fixes.map(f => `<div class="sub pay-row"><div class="sub-main"><span class="sub-text"><span class="card-title">${A.esc(f.symbol)}</span><span class="card-meta">${f.type === 'allot'
-          ? `${f.issue === 'ipo' ? 'IPO allotment' : 'Rights issue'}: ${qtyText(f.qty)} at ${money(f.price)} on ${day(f.date)}${f.note ? `. ${A.esc(f.note)}` : ''}`
+          ? A.esc(entryText(f))
           : `Set to ${qtyText(f.qty)}${f.avg != null ? ` at ${money(f.avg)}` : f.price ? `, added shares at ${money(f.price)}` : ''} on ${day(f.date)}`}</span></span></div>
           <button class="btn sm" data-act="pf-unmatch" data-id="${f.id}">Remove</button></div>`).join('')}</div></section>` : ''}
     </div></div>`;
@@ -863,9 +882,10 @@ function formDialog(title, fields, okLabel) {
     </div></form>`;
   return new Promise(resolve => {
     const form = d.querySelector('form');
-    let values = null;
-    form.addEventListener('submit', e => { if (e.submitter?.value) values = Object.fromEntries(new FormData(form)); });
-    d.onclose = () => resolve(d.returnValue ? values : null);
+    // Saved on submit: a closed dialog's close event can arrive late, or be lost
+    // when the next dialog takes over.
+    form.addEventListener('submit', e => { if (e.submitter?.value) resolve(Object.fromEntries(new FormData(form))); });
+    d.onclose = () => resolve(null);
     d.onclick = e => { if (e.target === d) d.close(''); };
     d.returnValue = '';
     d.showModal();
@@ -887,27 +907,60 @@ async function reviewNote(account, symbol) {
   A.refresh();
 }
 
-// Replaces the published terms for this holding, or records an issue they lack.
-async function overrideAllotment(account, symbol) {
-  const p = computed(account).positions.get(symbol);
-  const cur = p?.events.find(e => e.kind === 'allot');
-  const issue = cur?.source === 'IPO allotment' ? 'ipo' : 'rights';
-  const v = await formDialog(`Rights issue or IPO: ${symbol}`, `
-    <label class="f"><span>Type</span><select name="issue"><option value="rights"${issue === 'rights' ? ' selected' : ''}>Rights issue</option><option value="ipo"${issue === 'ipo' ? ' selected' : ''}>IPO allotment</option></select></label>
-    <label class="f"><span>Shares allotted, in the units of that date</span><input name="qty" type="number" min="0" step="any" required value="${cur?.qty ?? ''}"></label>
-    <label class="f"><span>Price per share</span><input name="price" type="number" min="0" step="any" required value="${cur?.price ?? ''}"></label>
-    <label class="f"><span>Allotment date</span><input name="date" type="date" required value="${cur?.date ?? holdingsOf(account.id)?.asOf ?? ''}"></label>
-    <label class="f"><span>Comment</span><input name="note" maxlength="200" value=""></label>`, 'Save');
+const number = (name, label, value) => `<label class="f"><span>${label}</span><input name="${name}" type="number" min="0" step="any" required value="${value ?? ''}"></label>`;
+
+// The form for one reconciling entry. `kind` is rights, transfer or other. A
+// rights or IPO entry replaces the published terms, or records an issue they
+// lack; transfers and others add up, as a holding can have several.
+async function reconcileEntry(account, symbol, kind) {
+  const c = computed(account);
+  const line = c.recon?.find(x => x.symbol === symbol);
+  const cur = kind === 'rights' ? c.positions.get(symbol)?.events.find(e => e.kind === 'allot' && /^(Rights|IPO)/.test(e.source)) : null;
+  const gap = line ? +Math.abs(line.fileQty - line.qty).toFixed(3) : 0;
+  const out = !!line && line.fileQty < line.qty;
+  const date = cur?.date ?? holdingsOf(account.id)?.asOf ?? '';
+  const way = (inLabel, outLabel) => `<label class="f"><span>Direction</span><select name="direction"><option value="in"${out ? '' : ' selected'}>${inLabel}</option><option value="out"${out ? ' selected' : ''}>${outLabel}</option></select></label>`;
+  const dateField = label => `<label class="f"><span>${label}</span><input name="date" type="date" required value="${date}"></label>`;
+  const comment = label => `<label class="f"><span>${label}</span><input name="note" maxlength="200"></label>`;
+  const forms = {
+    rights: [`Rights issue or IPO: ${symbol}`, `
+      <label class="f"><span>Type</span><select name="issue"><option value="rights">Rights issue</option><option value="ipo"${cur?.source === ISSUE_LABEL.ipo ? ' selected' : ''}>IPO allotment</option></select></label>
+      ${number('qty', 'Shares allotted, in the units of that date', cur?.qty ?? (gap || ''))}
+      ${number('price', 'Price per share', cur?.price)}
+      ${dateField('Allotment date')}${comment('Comment')}`],
+    transfer: [`Broker transfer: ${symbol}`, `
+      ${way('Transferred in', 'Transferred out')}
+      <label class="f"><span>Other broker</span><input name="party" maxlength="80" placeholder="e.g. ICICI Direct"></label>
+      ${number('qty', 'Shares, in the units of that date', gap || '')}
+      ${number('price', 'Cost per share', '')}
+      ${dateField('Date bought, to keep the holding period, or date moved')}${comment('Comment')}
+      <p>A transfer out takes the shares and their cost away, with no gain or loss.</p>`],
+    other: [`Other: ${symbol}`, `
+      ${way('Shares added', 'Shares removed')}
+      ${number('qty', 'Shares, in the units of that date', gap || '')}
+      ${number('price', 'Price per share', '')}
+      ${dateField('Date')}${comment('What happened')}
+      <p>Removing shares at a price above zero counts as a sale, with a realized gain or loss.</p>`],
+  };
+  const v = await formDialog(...forms[kind], 'Save');
   if (!v) return;
   const t = Date.now();
   const action = {
-    id: A.uid(), accountId: account.id, type: 'allot', issue: v.issue, symbol, date: v.date, qty: Number(v.qty), price: Number(v.price),
-    avg: null, note: v.note.trim() || 'Entered by hand', createdAt: t, updatedAt: t,
+    id: A.uid(), accountId: account.id, type: 'allot', issue: v.issue ?? kind, direction: v.direction ?? 'in', party: v.party?.trim() ?? '',
+    symbol, date: v.date, qty: Number(v.qty), price: Number(v.price), avg: null, note: v.note.trim(), createdAt: t, updatedAt: t,
   };
-  const old = A.S.portfolioActions.filter(a => a.accountId === account.id && a.type === 'allot' && a.symbol === symbol);
-  for (const a of old) await db.del('portfolioActions', a.id);
-  A.S.portfolioActions = [...A.S.portfolioActions.filter(a => !old.includes(a)), action];
+  if (kind === 'rights') {
+    const old = A.S.portfolioActions.filter(a => a.accountId === account.id && a.type === 'allot' && a.symbol === symbol && (a.issue === 'rights' || a.issue === 'ipo'));
+    for (const a of old) await db.del('portfolioActions', a.id);
+    A.S.portfolioActions = A.S.portfolioActions.filter(a => !old.includes(a));
+  }
+  A.S.portfolioActions.push(action);
   await A.persist('portfolioActions', action);
+  // Entering the details is the review, so they show in holdings straight away.
+  const cur2 = noteFor(account.id, symbol);
+  const note = { id: noteId(account.id, symbol), accountId: account.id, symbol, comment: cur2?.comment ?? '', reviewed: true, updatedAt: t };
+  A.S.portfolioNotes = [...A.S.portfolioNotes.filter(n => n.id !== note.id), note];
+  await A.persist('portfolioNotes', note);
   invalidate();
   A.refresh();
 }
@@ -1008,7 +1061,7 @@ export async function portfolioAction(b) {
     case 'pf-refresh': return refreshMarket(true);
     case 'pf-backup': return saveBackup();
     case 'pf-note': return reviewNote(accountById(id), symbol);
-    case 'pf-allot': return overrideAllotment(accountById(id), symbol);
+    case 'pf-allot': return reconcileEntry(accountById(id), symbol, b.dataset.kind);
     case 'pf-match': {
       const account = accountById(id);
       const x = computed(account).recon.find(i => i.symbol === symbol);
