@@ -3,7 +3,9 @@ import * as db from './db.js';
 import { renderMarkdown, toggleTask } from './markdown.js';
 import * as drive from './drive.js';
 import { CONFIG, VERSION } from './config.js';
-import { SECTIONS, DEFAULT_SECTION, sectionById } from './sections.js';
+import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } from './sections.js';
+import { cleanPayment, cleanRecord, cleanCategory } from './payments.js';
+import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
 
 const TRASH_DAYS = 30;
 const DAY = 24 * 60 * 60 * 1000;
@@ -24,6 +26,9 @@ const ls = {
 const S = {
   notebooks: [],
   notes: [],
+  payments: [],
+  paymentRecords: [],
+  paymentCategories: [],
   open: new Set(ls.get('open', [])),
   route: null,
   query: '',
@@ -203,6 +208,9 @@ const snapshot = () => ({
   exportedAt: new Date().toISOString(),
   notebooks: S.notebooks,
   notes: S.notes,
+  payments: S.payments,
+  paymentRecords: S.paymentRecords,
+  paymentCategories: S.paymentCategories,
 });
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -214,7 +222,7 @@ function cleanNotebook(x) {
   return {
     id: x.id,
     name: str(x.name, 80) || 'Notebook',
-    sectionId: sectionById(x.sectionId) ? x.sectionId : DEFAULT_SECTION,
+    sectionId: isNoteSection(x.sectionId) ? x.sectionId : DEFAULT_SECTION,
     createdAt: num(x.createdAt, t),
     updatedAt: num(x.updatedAt, t),
   };
@@ -265,6 +273,10 @@ async function importData(data) {
   }
   await db.putMany('notebooks', nbChanged);
   await db.putMany('notes', noteChanged);
+  for (const [store, clean] of [['paymentCategories', cleanCategory], ['payments', cleanPayment], ['paymentRecords', cleanRecord]]) {
+    const items = (Array.isArray(data[store]) ? data[store] : []).map(clean).filter(Boolean);
+    await db.putMany(store, items.map(x => merge(S[store], x, true)).filter(Boolean));
+  }
   await purgeTrash();
   markDirty();
   render();
@@ -318,6 +330,7 @@ async function autoBackup() {
 function parseRoute(hash) {
   const p = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   if (!p.length) return { name: 'home' };
+  if (p[0] === 's' && p[1] === 'payments') return { name: 'payments', section: p[1], page: p[2] || 'dashboard', id: p[3] };
   if (p[0] === 's' && p[1]) return { name: 'section', section: p[1] };
   if (p[0] === 'nb' && p[1]) {
     if (p[2] === 'archive') return { name: 'archive', nb: p[1] };
@@ -330,7 +343,7 @@ function parseRoute(hash) {
   return null;
 }
 
-const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id));
+const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id)) && (r.name !== 'payments' || payRouteValid(r));
 
 function go(hash, replace = false) {
   if (replace) location.replace(hash);
@@ -398,6 +411,7 @@ function renderView() {
   if (r.name === 'note') noteView(noteById(r.id));
   else if (r.name === 'home') homeView();
   else if (r.name === 'section') sectionView(sectionById(r.section));
+  else if (r.name === 'payments') paymentsView(r);
   else if (r.name === 'settings') settingsView();
   else listView(r);
 }
@@ -461,7 +475,11 @@ function renderDrawer() {
     tree += '</li>';
   }
 
-  const nav = sec
+  const payPage = ['add', 'edit', 'p'].includes(r.page) ? 'manage' : r.page;
+  const nav = sec?.app
+    ? `<div class="section-label"><span>${esc(sec.name)}</span></div>
+      <ul class="tree">${PAY_PAGES.map(p => `<li>${row(payPage === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${p.name}</span></a>`)}</li>`).join('')}</ul>`
+    : sec
     ? `${row(r.name === 'section', `
         <a class="label" href="#/s/${sec.id}">${icon(sec.icon)}<span>${esc(sec.name)}</span></a>
         <button class="icon-btn sm" data-act="new-notebook" data-id="${sec.id}" aria-label="New sub-section">${icon('plus')}</button>`)}
@@ -489,19 +507,24 @@ function homeView() {
     const ids = new Set(subsOf(sectionId).map(nb => nb.id));
     return S.notes.filter(n => ids.has(n.notebookId) && !n.deletedAt && !n.archived).length;
   };
+  // Reminders can only show while the app is open: there is no server to push them.
+  const dues = attentionNow();
+  const tileCount = s => {
+    if (s.app) return dues.length ? `${dues.length} to pay` : '';
+    const k = countIn(s.id);
+    return k ? plural(k, 'note') : '';
+  };
   view.innerHTML = `
     <header class="topbar">
       <div class="titles"><h1>SuperApp</h1><p>Choose a section</p></div>
       ${menuButton}
     </header>
-    <div class="scroll"><nav class="home" aria-label="Sections">${SECTIONS.map(s => {
-      const k = countIn(s.id);
-      return `<a class="tile" href="#/s/${s.id}" style="--tile:${s.light}">
+    ${dues.length ? `<div class="banner">${icon('card')}<span>${dues.length === 1 ? `${esc(dues[0].payment.name)} needs paying` : `${dues.length} payments need paying`}</span><a class="btn sm" href="#/s/payments">View</a></div>` : ''}
+    <div class="scroll"><nav class="home" aria-label="Sections">${SECTIONS.map(s => `<a class="tile" href="#/s/${s.id}" style="--tile:${s.light}">
         <span class="tile-icon">${icon(s.icon)}</span>
         <span class="tile-name">${esc(s.name)}</span>
-        <span class="tile-count">${k ? plural(k, 'note') : ''}</span>
-      </a>`;
-    }).join('')}</nav></div>`;
+        <span class="tile-count">${tileCount(s)}</span>
+      </a>`).join('')}</nav></div>`;
 }
 
 function subRow(nb) {
@@ -883,7 +906,7 @@ async function noteMenu(n) {
 }
 
 async function moveNote(n) {
-  const nbs = SECTIONS.flatMap(s => subsOf(s.id));
+  const nbs = NOTE_SECTIONS.flatMap(s => subsOf(s.id));
   const k = await choose('Move to sub-section', nbs.map(nb => ({ icon: 'book', label: nbLabel(nb), current: nb.id === n.notebookId })));
   if (k == null || nbs[k].id === n.notebookId) return;
   await updateNote(n, { notebookId: nbs[k].id });
@@ -916,12 +939,12 @@ async function notebookMenu(id) {
     await persist('notebooks', nb);
     render();
   } else if (k === 1) {
-    const j = await choose('Move to section', SECTIONS.map(s => ({ icon: s.icon, label: s.name, current: s.id === nb.sectionId })));
-    if (j == null || SECTIONS[j].id === nb.sectionId) return;
-    if (nameTaken(SECTIONS[j].id, nb.name)) return toast(`${nb.name} already exists in ${SECTIONS[j].name}`);
-    Object.assign(nb, { sectionId: SECTIONS[j].id, updatedAt: Date.now() });
+    const j = await choose('Move to section', NOTE_SECTIONS.map(s => ({ icon: s.icon, label: s.name, current: s.id === nb.sectionId })));
+    if (j == null || NOTE_SECTIONS[j].id === nb.sectionId) return;
+    if (nameTaken(NOTE_SECTIONS[j].id, nb.name)) return toast(`${nb.name} already exists in ${NOTE_SECTIONS[j].name}`);
+    Object.assign(nb, { sectionId: NOTE_SECTIONS[j].id, updatedAt: Date.now() });
     await persist('notebooks', nb);
-    toast(`Moved to ${SECTIONS[j].name}`);
+    toast(`Moved to ${NOTE_SECTIONS[j].name}`);
     render();
   } else if (k === 2) {
     const notes = S.notes.filter(n => n.notebookId === id && !n.deletedAt);
@@ -1028,7 +1051,7 @@ function settingsView() {
           ${canShare ? `<button class="btn" data-act="share-backup">${icon('share')}<span>Share backup</span></button>` : ''}
           <label class="btn">${icon('upload')}<span>Import backup</span><input type="file" id="import" accept=".json,application/json" hidden></label>
         </div>
-        <p class="muted small">Backups are a single .json file with every sub-section and note. Importing merges: newer versions win and nothing is deleted.</p>
+        <p class="muted small">Backups are a single .json file with every sub-section, note and payment. Importing merges: newer versions win and nothing is deleted.</p>
       </section>
       <section><h2>Google Drive backup</h2>${driveSection()}</section>
       <section>
@@ -1050,7 +1073,7 @@ function settingsView() {
     if (!file) return;
     try {
       const data = JSON.parse(await file.text());
-      if (!await confirmDlg('Import backup?', `Merge “${file.name}” into this device? Newer versions of each note win; nothing is deleted.`, 'Import', false)) return;
+      if (!await confirmDlg('Import backup?', `Merge “${file.name}” into this device? Newer versions of each item win; nothing is deleted.`, 'Import', false)) return;
       const { added, updated } = await importData(data);
       toast(`Imported: ${added} new, ${updated} updated`);
     } catch (err) {
@@ -1067,7 +1090,7 @@ function settingsView() {
 
 async function fillStorageInfo() {
   const live = S.notes.filter(n => !n.deletedAt).length;
-  const parts = [`${plural(live, 'note')} in ${plural(S.notebooks.length, 'sub-section')}`];
+  const parts = [`${plural(live, 'note')} in ${plural(S.notebooks.length, 'sub-section')}`, plural(S.payments.length, 'payment')];
   try {
     const est = await navigator.storage?.estimate?.();
     if (est?.usage != null) parts.push(`${fmtBytes(est.usage)} used`);
@@ -1114,6 +1137,7 @@ view.addEventListener('click', async e => {
   if (!b) return;
   const r = S.route;
   const n = r.name === 'note' ? noteById(r.id) : null;
+  if (b.dataset.act.startsWith('pay-')) return paymentAction(b);
   switch (b.dataset.act) {
     case 'drawer': return openDrawer();
     case 'back': return goBack();
@@ -1155,7 +1179,7 @@ view.addEventListener('click', async e => {
         const res = await drive.download();
         if (!res) return toast('No backup found in your Drive yet.');
         const when = relDate(new Date(res.file.modifiedTime).getTime());
-        if (!await confirmDlg('Restore from Drive?', `Merge the Drive backup from ${when} into this device? Newer versions of each note win; nothing is deleted.`, 'Restore', false)) return;
+        if (!await confirmDlg('Restore from Drive?', `Merge the Drive backup from ${when} into this device? Newer versions of each item win; nothing is deleted.`, 'Restore', false)) return;
         const { added, updated } = await importData(res.data);
         toast(`Restored: ${added} new, ${updated} updated`);
       });
@@ -1195,14 +1219,16 @@ function registerSW() {
 
 async function init() {
   applyTheme();
+  initPayments({ S, $, view, esc, uid, fmt, plural, toast, ask, confirmDlg, choose, go, persist, refresh, markDirty, upButton, menuButton });
   try {
-    [S.notebooks, S.notes] = await Promise.all([db.all('notebooks'), db.all('notes')]);
+    [S.notebooks, S.notes, S.payments, S.paymentRecords, S.paymentCategories] = await Promise.all(
+      ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories'].map(db.all));
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;
     return;
   }
-  // Notebooks from before sections existed become sub-sections of Personal.
-  const stray = S.notebooks.filter(nb => !sectionById(nb.sectionId));
+  // Notebooks outside a note section become sub-sections of Personal.
+  const stray = S.notebooks.filter(nb => !isNoteSection(nb.sectionId));
   if (stray.length) {
     stray.forEach(nb => { nb.sectionId = DEFAULT_SECTION; });
     await db.putMany('notebooks', stray);

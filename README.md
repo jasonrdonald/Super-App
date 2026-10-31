@@ -1,11 +1,12 @@
 # SuperApp
 
-An offline-first Markdown notes PWA for phones. Plain HTML/CSS/JS: no build step and no dependencies.
+An offline-first PWA for phones with Markdown notes and a recurring payments tracker. Plain HTML/CSS/JS: no build step and no dependencies.
 
 ## Features
 
 - **Sections**: the main page shows Personal, Payments, Family, Household, Vehicles, Finance and Work as app icons. Choosing one recolours the app.
-- **Sub-sections**: add them inside a section from a dropdown of suggestions, or name your own. Each one is its own notebook that you can rename, move to another section or delete, with a navigation tree grouped by **year → month** (by creation date) and its own **Archive**.
+- **Payments**: add recurring payments under Bills, Repayments, Subscriptions & Memberships or your own categories. Mark each due as paid with the actual amount, and end a payment to keep its history with no future dues. The **Dashboard** shows pending payments, a summary and amounts by category, month-wise or year-wise. The **Report** lists every payment detail for a month or year and exports to PDF through the browser's print dialog. Reminders appear in the app when it is opened; they can't reach the phone while the app is closed. Set the currency in `js/config.js`.
+- **Sub-sections**: in the note sections, add them from a dropdown of suggestions, or name your own. Each one is its own notebook that you can rename, move to another section or delete, with a navigation tree grouped by **year → month** (by creation date) and its own **Archive**.
 - **Markdown notes** with Edit/Preview modes. The formatting toolbar inserts Markdown for bold, italic, strikethrough, headings, bullet/numbered/check lists, quotes, inline code, code blocks, links, dividers and indent/outdent. Pressing Enter continues a list. Checkboxes can be ticked in Preview.
 - **Supported Markdown**: headings, emphasis, `~~strike~~`, `==highlight==`, lists, task lists, quotes, code, tables, links, images and auto-links. Raw HTML is always escaped.
 - **Dark theme**: follows the system setting, or you can force Light or Dark in Settings.
@@ -40,8 +41,10 @@ The app only requests `drive.file`, so it can see only the files it creates, not
 | `css/styles.css` | Styles, light/dark tokens |
 | `js/app.js` | Routing, views, editor, backup, trash |
 | `js/sections.js` | Sections: names, icons, colours, suggested sub-sections |
+| `js/payments.js` | Payment categories, due-date schedule and stored shapes |
+| `js/payments-view.js` | Payments dashboard, manage pages, report and actions |
 | `js/markdown.js` | Safe Markdown renderer |
 | `js/db.js` | IndexedDB storage |
 | `js/drive.js` | Google sign-in + Drive upload/download |
-| `js/config.js` | Version and Google Client ID |
+| `js/config.js` | Version, Google Client ID and currency |
 | `sw.js` | Offline cache. Bump `VERSION` when you ship changes |
