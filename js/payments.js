@@ -212,3 +212,9 @@ export function cleanCategory(x) {
   const t = Date.now();
   return { id: x.id, name: str(x.name, 80) || 'Custom', createdAt: num(x.createdAt, t), updatedAt: num(x.updatedAt, t) };
 }
+
+export function cleanType(x) {
+  if (!x || typeof x.id !== 'string' || typeof x.categoryId !== 'string') return null;
+  const t = Date.now();
+  return { id: x.id, categoryId: x.categoryId, name: str(x.name, 80) || 'Custom', createdAt: num(x.createdAt, t), updatedAt: num(x.updatedAt, t) };
+}

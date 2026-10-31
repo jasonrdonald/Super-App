@@ -43,6 +43,12 @@ const cycleLabel = p => `${ordinal(p.cycleFrom)} to ${ordinal(p.cycleTo)}`;
 const categoryList = () => [...CATEGORIES, ...[...A.S.paymentCategories].sort((a, b) => a.createdAt - b.createdAt)];
 const categoryName = id => categoryList().find(c => c.id === id)?.name ?? 'Custom';
 const typeLine = p => [categoryName(p.categoryId), p.type].filter(Boolean).join(' / ');
+const customTypes = categoryId => A.S.paymentTypes.filter(t => t.categoryId === categoryId).sort((a, b) => a.createdAt - b.createdAt);
+const typesOf = categoryId => [
+  ...(CATEGORIES.find(c => c.id === categoryId)?.types.map(t => t[0]) ?? []),
+  ...customTypes(categoryId).map(t => t.name),
+];
+const typeTaken = (categoryId, name, except) => typesOf(categoryId).some(t => t !== except && t.toLowerCase() === name.toLowerCase());
 
 export const payRouteValid = r => (r.page === 'dashboard' || r.page === 'manage' || r.page === 'report' || r.page === 'add')
   ? !r.id
@@ -242,14 +248,13 @@ function renderManageList() {
 
 function manageView(r) {
   const endedCount = A.S.payments.filter(p => p.endedAt).length;
-  const customs = A.S.paymentCategories.length;
   shell(r, `${A.plural(A.S.payments.length - endedCount, 'active payment')}`, `<div class="pay-page">
     <div class="period">
       <div class="seg" role="group" aria-label="Active or ended">
         <button data-list="active" aria-pressed="${P.list === 'active'}">Active</button>
         <button data-list="ended" aria-pressed="${P.list === 'ended'}">Ended${endedCount ? ` (${endedCount})` : ''}</button>
       </div>
-      <button class="btn sm" data-act="pay-cats">${icon('folder')}<span>Categories${customs ? ` (${customs})` : ''}</span></button>
+      <button class="btn sm" data-act="pay-cats">${icon('folder')}<span>Categories</span></button>
     </div>
     <label class="search flush">${icon('search')}<input type="search" id="pay-q" placeholder="Search payments" value="${A.esc(P.q)}" autocomplete="off" enterkeyhint="search"></label>
     <div class="rows" id="pay-list"></div>
@@ -278,22 +283,27 @@ function formView(r) {
     <div class="scroll"><form class="pay-form" id="pay-form" novalidate>
       <label class="f wide"><span>Payment name</span><input name="name" required maxlength="80" placeholder="e.g. Home rent" value="${A.esc(v.name)}" autocomplete="off"></label>
       <label class="f"><span>Payment category</span><select name="categoryId" id="f-cat"></select></label>
-      <label class="f" id="f-type-wrap"><span>Type</span><select name="type" id="f-type"></select></label>
+      <label class="f"><span>Payment type</span><select name="type" id="f-type"></select></label>
       <p class="muted small wide" id="f-hint"></p>
-      <label class="f"><span>Tentative amount</span><input name="tentative" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="0" value="${A.esc(v.tentative)}"></label>
-      <label class="f"><span>Remind before due date (days)</span><input name="remindDays" type="number" inputmode="numeric" min="0" max="365" step="1" required value="${A.esc(v.remindDays)}"></label>
-      <fieldset class="f wide"><legend>Billing cycle</legend><div class="f-pair">
-        <select name="cycleFrom" aria-label="Billing cycle starts on">${days(v.cycleFrom)}</select><span>to</span>
-        <select name="cycleTo" aria-label="Billing cycle ends on">${days(v.cycleTo)}</select>
-      </div></fieldset>
-      <label class="f"><span>Expected bill date</span><input name="billDate" type="date" value="${A.esc(v.billDate)}"></label>
+      <label class="f"><span>Amount</span><input name="tentative" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="0" value="${A.esc(v.tentative)}"></label>
       <label class="f"><span>Due date</span><input name="dueDate" type="date" required value="${A.esc(v.dueDate)}"></label>
-      <label class="f"><span>Frequency of bill</span><select name="frequency" id="f-freq">${FREQUENCIES.map(f => `<option value="${f.id}"${f.id === v.frequency ? ' selected' : ''}>${f.label}</option>`).join('')}</select></label>
+      <label class="f"><span>Frequency</span><select name="frequency" id="f-freq">${FREQUENCIES.map(f => `<option value="${f.id}"${f.id === v.frequency ? ' selected' : ''}>${f.label}</option>`).join('')}</select></label>
       <label class="f" id="f-days-wrap"><span>Number of days</span><input name="everyDays" type="number" inputmode="numeric" min="1" max="3650" step="1" value="${A.esc(v.everyDays)}"></label>
-      <label class="f"><span>When</span><select name="when">${options(WHEN, v.when)}</select></label>
-      <label class="f"><span>Payment channel</span><select name="channel">${options(CHANNELS, v.channel)}</select></label>
-      <label class="f"><span>Payment mode</span><select name="mode">${options(MODES, v.mode)}</select></label>
       <label class="f wide"><span>Comments</span><textarea name="comments" rows="3" maxlength="2000">${A.esc(v.comments)}</textarea></label>
+      <details class="more wide" id="f-more">
+        <summary>${icon('chevron')}<span>More fields</span></summary>
+        <div class="more-fields">
+          <label class="f"><span>Remind before due date (days)</span><input name="remindDays" type="number" inputmode="numeric" min="0" max="365" step="1" required value="${A.esc(v.remindDays)}"></label>
+          <label class="f"><span>Expected bill date</span><input name="billDate" type="date" value="${A.esc(v.billDate)}"></label>
+          <fieldset class="f wide"><legend>Billing cycle</legend><div class="f-pair">
+            <select name="cycleFrom" aria-label="Billing cycle starts on">${days(v.cycleFrom)}</select><span>to</span>
+            <select name="cycleTo" aria-label="Billing cycle ends on">${days(v.cycleTo)}</select>
+          </div></fieldset>
+          <label class="f"><span>When</span><select name="when">${options(WHEN, v.when)}</select></label>
+          <label class="f"><span>Payment channel</span><select name="channel">${options(CHANNELS, v.channel)}</select></label>
+          <label class="f"><span>Payment mode</span><select name="mode">${options(MODES, v.mode)}</select></label>
+        </div>
+      </details>
       <div class="f-actions wide">
         <button class="btn primary" type="submit">${p ? 'Save changes' : 'Add payment'}</button>
         <a class="btn ghost" href="${p ? `#/s/payments/p/${p.id}` : MANAGE}">Cancel</a>
@@ -302,7 +312,7 @@ function formView(r) {
 
   const form = A.$('#pay-form');
   const cat = A.$('#f-cat'), type = A.$('#f-type'), hint = A.$('#f-hint'), freq = A.$('#f-freq');
-  let lastCat = v.categoryId;
+  let lastCat = v.categoryId, lastType = v.type;
 
   const fillCats = () => {
     cat.innerHTML = categoryList().map(c => `<option value="${c.id}"${c.id === lastCat ? ' selected' : ''}>${A.esc(c.name)}</option>`).join('')
@@ -315,9 +325,11 @@ function formView(r) {
     hint.hidden = !c;
   };
   const fillTypes = current => {
-    const c = CATEGORIES.find(x => x.id === cat.value);
-    A.$('#f-type-wrap').hidden = !c;
-    type.innerHTML = c ? c.types.map(([t]) => `<option${t === current ? ' selected' : ''}>${A.esc(t)}</option>`).join('') : '';
+    const names = typesOf(cat.value);
+    if (current && !names.includes(current)) names.push(current);
+    type.innerHTML = (CATEGORIES.some(x => x.id === cat.value) ? '' : '<option value="">None</option>')
+      + options(names, current) + '<option value="+">Add new type…</option>';
+    lastType = type.value;
     showHint();
   };
   const showDays = () => { A.$('#f-days-wrap').hidden = freq.value !== 'days'; };
@@ -336,10 +348,20 @@ function formView(r) {
     }
     fillTypes();
   });
-  type.addEventListener('change', showHint);
+  type.addEventListener('change', async () => {
+    if (type.value === '+') {
+      const t = await addType(cat.value);
+      fillTypes(t?.name ?? lastType);
+    } else {
+      lastType = type.value;
+      showHint();
+    }
+  });
   freq.addEventListener('change', showDays);
   form.addEventListener('submit', async e => {
     e.preventDefault();
+    // A problem in a closed section can't be shown until it opens.
+    if (A.$('#f-more').querySelector(':invalid')) A.$('#f-more').open = true;
     if (!form.reportValidity()) return;
     const d = Object.fromEntries(new FormData(form));
     const t = Date.now();
@@ -384,37 +406,90 @@ async function addCategory() {
   return c;
 }
 
+async function addType(categoryId) {
+  const name = (await A.ask('New payment type', '', 'Type name'))?.trim();
+  if (!name) return null;
+  if (typeTaken(categoryId, name)) {
+    A.toast(`${name} already exists`);
+    return null;
+  }
+  const t = Date.now();
+  const type = { id: A.uid(), categoryId, name, createdAt: t, updatedAt: t };
+  A.S.paymentTypes.push(type);
+  await A.persist('paymentTypes', type);
+  return type;
+}
+
 async function categoriesMenu() {
-  const customs = [...A.S.paymentCategories].sort((a, b) => a.createdAt - b.createdAt);
-  const k = await A.choose('Custom categories', [
-    ...customs.map(c => ({ icon: 'folder', label: c.name })),
+  const cats = categoryList();
+  const k = await A.choose('Categories', [
+    ...cats.map(c => ({ icon: 'folder', label: c.name })),
     { icon: 'plus', label: 'Add new category' },
   ]);
   if (k == null) return;
-  if (k === customs.length) {
+  if (k === cats.length) {
     if (await addCategory()) A.refresh();
     return;
   }
-  const c = customs[k];
-  const j = await A.choose(c.name, [
-    { icon: 'edit', label: 'Rename' },
-    { icon: 'trash', label: 'Delete category', danger: true },
+  const c = cats[k];
+  const acts = [
+    ...customTypes(c.id).map(t => [{ icon: 'list', label: t.name }, () => typeMenu(t)]),
+    [{ icon: 'plus', label: 'Add new type' }, async () => {
+      const t = await addType(c.id);
+      if (t) A.toast(`Added ${t.name} to ${c.name}`);
+    }],
+    ...(CATEGORIES.includes(c) ? [] : [
+      [{ icon: 'edit', label: 'Rename category' }, () => renameCategory(c)],
+      [{ icon: 'trash', label: 'Delete category', danger: true }, () => deleteCategory(c)],
+    ]),
+  ];
+  const j = await A.choose(c.name, acts.map(a => a[0]));
+  if (j != null) acts[j][1]();
+}
+
+async function renameCategory(c) {
+  const name = (await A.ask('Rename category', c.name))?.trim();
+  if (!name) return;
+  if (categoryList().some(x => x !== c && x.name.toLowerCase() === name.toLowerCase())) return A.toast(`${name} already exists`);
+  Object.assign(c, { name, updatedAt: Date.now() });
+  await A.persist('paymentCategories', c);
+  A.refresh();
+}
+
+async function deleteCategory(c) {
+  const used = A.S.payments.filter(p => p.categoryId === c.id).length;
+  if (used) return A.toast(`${c.name} is used by ${A.plural(used, 'payment')}`);
+  for (const t of customTypes(c.id)) await db.del('paymentTypes', t.id);
+  A.S.paymentTypes = A.S.paymentTypes.filter(t => t.categoryId !== c.id);
+  A.S.paymentCategories = A.S.paymentCategories.filter(x => x !== c);
+  await db.del('paymentCategories', c.id);
+  A.markDirty();
+  A.toast('Category deleted');
+  A.refresh();
+}
+
+async function typeMenu(t) {
+  const users = A.S.payments.filter(p => p.categoryId === t.categoryId && p.type === t.name);
+  const k = await A.choose(t.name, [
+    { icon: 'edit', label: 'Rename type' },
+    { icon: 'trash', label: 'Delete type', danger: true },
   ]);
-  if (j === 0) {
-    const name = (await A.ask('Rename category', c.name))?.trim();
-    if (!name) return;
-    if (categoryList().some(x => x !== c && x.name.toLowerCase() === name.toLowerCase())) return A.toast(`${name} already exists`);
-    Object.assign(c, { name, updatedAt: Date.now() });
-    await A.persist('paymentCategories', c);
+  if (k === 0) {
+    const name = (await A.ask('Rename type', t.name))?.trim();
+    if (!name || name === t.name) return;
+    if (typeTaken(t.categoryId, name, t.name)) return A.toast(`${name} already exists`);
+    const when = Date.now();
+    Object.assign(t, { name, updatedAt: when });
+    await A.persist('paymentTypes', t);
+    users.forEach(p => Object.assign(p, { type: name, updatedAt: when }));
+    await db.putMany('payments', users);
     A.refresh();
-  } else if (j === 1) {
-    const used = A.S.payments.filter(p => p.categoryId === c.id).length;
-    if (used) return A.toast(`${c.name} is used by ${A.plural(used, 'payment')}`);
-    A.S.paymentCategories = A.S.paymentCategories.filter(x => x !== c);
-    await db.del('paymentCategories', c.id);
+  } else if (k === 1) {
+    if (users.length) return A.toast(`${t.name} is used by ${A.plural(users.length, 'payment')}`);
+    A.S.paymentTypes = A.S.paymentTypes.filter(x => x !== t);
+    await db.del('paymentTypes', t.id);
     A.markDirty();
-    A.toast('Category deleted');
-    A.refresh();
+    A.toast('Type deleted');
   }
 }
 

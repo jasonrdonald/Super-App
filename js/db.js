@@ -2,7 +2,7 @@
 // persistent storage for this app.
 
 const DB_NAME = 'superapp-notes';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let dbPromise;
 
 function open() {
@@ -14,7 +14,7 @@ function open() {
       if (!db.objectStoreNames.contains('notes')) {
         db.createObjectStore('notes', { keyPath: 'id' }).createIndex('notebookId', 'notebookId');
       }
-      for (const store of ['payments', 'paymentRecords', 'paymentCategories']) {
+      for (const store of ['payments', 'paymentRecords', 'paymentCategories', 'paymentTypes']) {
         if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' });
       }
     };

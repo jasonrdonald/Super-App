@@ -4,7 +4,7 @@ import { renderMarkdown, toggleTask } from './markdown.js';
 import * as drive from './drive.js';
 import { CONFIG, VERSION } from './config.js';
 import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } from './sections.js';
-import { cleanPayment, cleanRecord, cleanCategory } from './payments.js';
+import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
 
 const TRASH_DAYS = 30;
@@ -29,6 +29,7 @@ const S = {
   payments: [],
   paymentRecords: [],
   paymentCategories: [],
+  paymentTypes: [],
   open: new Set(ls.get('open', [])),
   route: null,
   query: '',
@@ -211,6 +212,7 @@ const snapshot = () => ({
   payments: S.payments,
   paymentRecords: S.paymentRecords,
   paymentCategories: S.paymentCategories,
+  paymentTypes: S.paymentTypes,
 });
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -273,7 +275,7 @@ async function importData(data) {
   }
   await db.putMany('notebooks', nbChanged);
   await db.putMany('notes', noteChanged);
-  for (const [store, clean] of [['paymentCategories', cleanCategory], ['payments', cleanPayment], ['paymentRecords', cleanRecord]]) {
+  for (const [store, clean] of [['paymentCategories', cleanCategory], ['paymentTypes', cleanType], ['payments', cleanPayment], ['paymentRecords', cleanRecord]]) {
     const items = (Array.isArray(data[store]) ? data[store] : []).map(clean).filter(Boolean);
     await db.putMany(store, items.map(x => merge(S[store], x, true)).filter(Boolean));
   }
@@ -1221,8 +1223,8 @@ async function init() {
   applyTheme();
   initPayments({ S, $, view, esc, uid, fmt, plural, toast, ask, confirmDlg, choose, go, persist, refresh, markDirty, upButton, menuButton });
   try {
-    [S.notebooks, S.notes, S.payments, S.paymentRecords, S.paymentCategories] = await Promise.all(
-      ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories'].map(db.all));
+    [S.notebooks, S.notes, S.payments, S.paymentRecords, S.paymentCategories, S.paymentTypes] = await Promise.all(
+      ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes'].map(db.all));
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;
     return;
