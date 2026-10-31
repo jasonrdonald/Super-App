@@ -1,5 +1,5 @@
 // Offline app shell. Bump VERSION when shipping changes so clients update.
-const VERSION = 'v1.3.0';
+const VERSION = 'v1.6.2';
 const CACHE = `notes-${VERSION}`;
 const ASSETS = [
   './',
@@ -14,6 +14,13 @@ const ASSETS = [
   'js/markdown.js',
   'js/payments.js',
   'js/payments-view.js',
+  'js/portfolio.js',
+  'js/portfolio-import.js',
+  'js/tickers.js',
+  'js/portfolio-view.js',
+  'js/corporate-actions.js',
+  'js/market.js',
+  'js/xlsx.js',
   'js/sections.js',
   'icons/icon.svg',
   'icons/icon-192.png',

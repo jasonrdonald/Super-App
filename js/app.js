@@ -6,6 +6,8 @@ import { CONFIG, VERSION } from './config.js';
 import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } from './sections.js';
 import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
+import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote as cleanPortfolioNote } from './portfolio.js';
+import { initPortfolio, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTotal, portfolioChanged } from './portfolio-view.js';
 
 const TRASH_DAYS = 30;
 const DAY = 24 * 60 * 60 * 1000;
@@ -30,6 +32,12 @@ const S = {
   paymentRecords: [],
   paymentCategories: [],
   paymentTypes: [],
+  brokerAccounts: [],
+  trades: [],
+  brokerHoldings: [],
+  portfolioActions: [],
+  portfolioNotes: [],
+  market: [],
   open: new Set(ls.get('open', [])),
   route: null,
   query: '',
@@ -213,6 +221,11 @@ const snapshot = () => ({
   paymentRecords: S.paymentRecords,
   paymentCategories: S.paymentCategories,
   paymentTypes: S.paymentTypes,
+  brokerAccounts: S.brokerAccounts,
+  trades: S.trades,
+  brokerHoldings: S.brokerHoldings,
+  portfolioActions: S.portfolioActions,
+  portfolioNotes: S.portfolioNotes,
 });
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -275,10 +288,12 @@ async function importData(data) {
   }
   await db.putMany('notebooks', nbChanged);
   await db.putMany('notes', noteChanged);
-  for (const [store, clean] of [['paymentCategories', cleanCategory], ['paymentTypes', cleanType], ['payments', cleanPayment], ['paymentRecords', cleanRecord]]) {
+  for (const [store, clean] of [['paymentCategories', cleanCategory], ['paymentTypes', cleanType], ['payments', cleanPayment], ['paymentRecords', cleanRecord],
+    ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote]]) {
     const items = (Array.isArray(data[store]) ? data[store] : []).map(clean).filter(Boolean);
     await db.putMany(store, items.map(x => merge(S[store], x, true)).filter(Boolean));
   }
+  portfolioChanged();
   await purgeTrash();
   markDirty();
   render();
@@ -333,6 +348,14 @@ function parseRoute(hash) {
   const p = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   if (!p.length) return { name: 'home' };
   if (p[0] === 's' && p[1] === 'payments') return { name: 'payments', section: p[1], page: p[2] || 'dashboard', id: p[3] };
+  if (p[0] === 's' && p[1] === 'portfolio') {
+    const base = { name: 'portfolio', section: p[1] };
+    if (!p[2]) return { ...base, page: 'home' };
+    if (p[2] === 'add') return { ...base, page: 'add' };
+    if (p[2] !== 'a' || !p[3]) return null;
+    if (p[4] === 'h') return { ...base, page: 'stock', id: p[3], symbol: p[5] };
+    return { ...base, page: p[4] || 'account', id: p[3] };
+  }
   if (p[0] === 's' && p[1]) return { name: 'section', section: p[1] };
   if (p[0] === 'nb' && p[1]) {
     if (p[2] === 'archive') return { name: 'archive', nb: p[1] };
@@ -345,7 +368,7 @@ function parseRoute(hash) {
   return null;
 }
 
-const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id)) && (r.name !== 'payments' || payRouteValid(r));
+const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id)) && (r.name !== 'payments' || payRouteValid(r)) && (r.name !== 'portfolio' || portfolioRouteValid(r));
 
 function go(hash, replace = false) {
   if (replace) location.replace(hash);
@@ -414,6 +437,7 @@ function renderView() {
   else if (r.name === 'home') homeView();
   else if (r.name === 'section') sectionView(sectionById(r.section));
   else if (r.name === 'payments') paymentsView(r);
+  else if (r.name === 'portfolio') portfolioView(r);
   else if (r.name === 'settings') settingsView();
   else listView(r);
 }
@@ -478,9 +502,11 @@ function renderDrawer() {
   }
 
   const payPage = ['add', 'edit', 'p'].includes(r.page) ? 'manage' : r.page;
+  const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.app ? portfolioNav() : [];
+  const current = sec?.id === 'payments' ? payPage : r.id ?? 'home';
   const nav = sec?.app
     ? `<div class="section-label"><span>${esc(sec.name)}</span></div>
-      <ul class="tree">${PAY_PAGES.map(p => `<li>${row(payPage === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${p.name}</span></a>`)}</li>`).join('')}</ul>`
+      <ul class="tree">${pages.map(p => `<li>${row(current === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${esc(p.name)}</span></a>`)}</li>`).join('')}</ul>`
     : sec
     ? `${row(r.name === 'section', `
         <a class="label" href="#/s/${sec.id}">${icon(sec.icon)}<span>${esc(sec.name)}</span></a>
@@ -512,7 +538,8 @@ function homeView() {
   // Reminders can only show while the app is open: there is no server to push them.
   const dues = attentionNow();
   const tileCount = s => {
-    if (s.app) return dues.length ? `${dues.length} to pay` : '';
+    if (s.id === 'payments') return dues.length ? `${dues.length} to pay` : '';
+    if (s.app) return S.brokerAccounts.length ? new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, maximumFractionDigits: 0 }).format(portfolioTotal().value) : '';
     const k = countIn(s.id);
     return k ? plural(k, 'note') : '';
   };
@@ -1053,7 +1080,7 @@ function settingsView() {
           ${canShare ? `<button class="btn" data-act="share-backup">${icon('share')}<span>Share backup</span></button>` : ''}
           <label class="btn">${icon('upload')}<span>Import backup</span><input type="file" id="import" accept=".json,application/json" hidden></label>
         </div>
-        <p class="muted small">Backups are a single .json file with every sub-section, note and payment. Importing merges: newer versions win and nothing is deleted.</p>
+        <p class="muted small">Backups are a single .json file with every sub-section, note, payment and trade. Importing merges: newer versions win and nothing is deleted.</p>
       </section>
       <section><h2>Google Drive backup</h2>${driveSection()}</section>
       <section>
@@ -1092,7 +1119,7 @@ function settingsView() {
 
 async function fillStorageInfo() {
   const live = S.notes.filter(n => !n.deletedAt).length;
-  const parts = [`${plural(live, 'note')} in ${plural(S.notebooks.length, 'sub-section')}`, plural(S.payments.length, 'payment')];
+  const parts = [`${plural(live, 'note')} in ${plural(S.notebooks.length, 'sub-section')}`, plural(S.payments.length, 'payment'), plural(S.trades.length, 'trade')];
   try {
     const est = await navigator.storage?.estimate?.();
     if (est?.usage != null) parts.push(`${fmtBytes(est.usage)} used`);
@@ -1140,6 +1167,7 @@ view.addEventListener('click', async e => {
   const r = S.route;
   const n = r.name === 'note' ? noteById(r.id) : null;
   if (b.dataset.act.startsWith('pay-')) return paymentAction(b);
+  if (b.dataset.act.startsWith('pf-')) return portfolioAction(b);
   switch (b.dataset.act) {
     case 'drawer': return openDrawer();
     case 'back': return goBack();
@@ -1221,10 +1249,12 @@ function registerSW() {
 
 async function init() {
   applyTheme();
-  initPayments({ S, $, view, esc, uid, fmt, plural, toast, ask, confirmDlg, choose, go, persist, refresh, markDirty, upButton, menuButton });
+  const helpers = { S, $, ls, view, esc, uid, fmt, relDate, plural, toast, ask, confirmDlg, choose, go, persist, refresh, markDirty, upButton, menuButton, downloadFile };
+  initPayments(helpers);
+  initPortfolio(helpers);
   try {
-    [S.notebooks, S.notes, S.payments, S.paymentRecords, S.paymentCategories, S.paymentTypes] = await Promise.all(
-      ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes'].map(db.all));
+    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'market'];
+    (await Promise.all(stores.map(db.all))).forEach((rows, i) => { S[stores[i]] = rows; });
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;
     return;

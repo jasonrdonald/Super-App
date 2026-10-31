@@ -6,6 +6,7 @@ An offline-first PWA for phones with Markdown notes and a recurring payments tra
 
 - **Sections**: the main page shows Personal, Payments, Family, Household, Vehicles, Finance and Work as app icons. Choosing one recolours the app.
 - **Payments**: add recurring payments under Bills, Repayments, Subscriptions & Memberships or your own categories, and add your own payment types to any category. Mark each due as paid with the actual amount, and end a payment to keep its history with no future dues. The **Dashboard** shows pending payments, a summary and amounts by category, month-wise or year-wise. The **Report** lists every payment detail for a month or year and exports to PDF through the browser's print dialog. Reminders appear in the app when it is opened; they can't reach the phone while the app is closed. Set the currency in `js/config.js`.
+- **Portfolio**: manage broker accounts for stocks, mutual funds and crypto. Load Zerodha tradebooks (`.xlsx` or `.csv`) or HDFC Securities trade and mutual fund reports (company names are matched to tickers), plus the holdings file, to build FIFO holdings with splits, bonuses, mergers, demergers, rights issues and IPO allotments applied, then reconcile against the broker. Each open lot shows its original shares and why they changed, and system notes can be reviewed, commented on or overridden. Prices come from TradingView's scanner (delayed), splits and dividends from Yahoo Finance through a relay, mutual fund NAVs from mfapi.in and crypto from CoinGecko. Only symbols and fund names leave the device. A first load of splits and dividends runs in the background at about 18 stocks a minute. The Portfolio page backs up all brokers to one `.json` file, and importing it restores however many it holds, along with the loaded splits and dividends.
 - **Sub-sections**: in the note sections, add them from a dropdown of suggestions, or name your own. Each one is its own notebook that you can rename, move to another section or delete, with a navigation tree grouped by **year → month** (by creation date) and its own **Archive**.
 - **Markdown notes** with Edit/Preview modes. The formatting toolbar inserts Markdown for bold, italic, strikethrough, headings, bullet/numbered/check lists, quotes, inline code, code blocks, links, dividers and indent/outdent. Pressing Enter continues a list. Checkboxes can be ticked in Preview.
 - **Supported Markdown**: headings, emphasis, `~~strike~~`, `==highlight==`, lists, task lists, quotes, code, tables, links, images and auto-links. Raw HTML is always escaped.
@@ -43,6 +44,13 @@ The app only requests `drive.file`, so it can see only the files it creates, not
 | `js/sections.js` | Sections: names, icons, colours, suggested sub-sections |
 | `js/payments.js` | Payment categories, due-date schedule and stored shapes |
 | `js/payments-view.js` | Payments dashboard, manage pages, report and actions |
+| `js/portfolio.js` | FIFO replay of trades and corporate actions, gains, reconciliation |
+| `js/portfolio-view.js` | Broker accounts, holdings table, stock drill-down, reconcile pages |
+| `js/portfolio-import.js` | Reads broker tradebooks and holdings files |
+| `js/tickers.js` | Matches company names in broker files to tickers |
+| `js/corporate-actions.js` | Mergers, demergers, rights issues and IPOs Yahoo doesn't carry |
+| `js/market.js` | Prices, splits, dividends, fund NAVs and crypto quotes |
+| `js/xlsx.js` | Reads `.xlsx` and `.csv` files in the browser |
 | `js/markdown.js` | Safe Markdown renderer |
 | `js/db.js` | IndexedDB storage |
 | `js/drive.js` | Google sign-in + Drive upload/download |
