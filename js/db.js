@@ -37,3 +37,4 @@ export const all = store => run(store, 'readonly', s => s.getAll());
 export const put = (store, value) => run(store, 'readwrite', s => { s.put(value); });
 export const putMany = (store, values) => run(store, 'readwrite', s => { values.forEach(v => s.put(v)); });
 export const del = (store, id) => run(store, 'readwrite', s => { s.delete(id); });
+export const clear = store => run(store, 'readwrite', s => { s.clear(); });

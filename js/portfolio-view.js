@@ -338,8 +338,17 @@ async function saveBackup() {
   A.downloadFile(new File([body], name, { type: 'application/json' }));
 }
 
-// Merges like the app-wide backup: the newer copy of each row wins and nothing
-// here is deleted. Quotes and history are compared by when they were fetched.
+// Market data stays: it is public, and slow to load again.
+async function clearBrokers() {
+  for (const store of ['brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes']) {
+    await db.clear(store);
+    A.S[store] = [];
+  }
+}
+
+// Merges like the app-wide backup: the newer copy of each row wins, and nothing
+// is deleted unless you choose to clear first. Quotes and history are compared
+// by when they were fetched.
 async function restoreBackup(file) {
   let data;
   try {
@@ -354,8 +363,14 @@ async function restoreBackup(file) {
   const accountsIn = rows('brokerAccounts', cleanAccount);
   const ids = new Set(accountsIn.map(a => a.id));
   const tradesIn = rows('trades', cleanTrade).filter(t => ids.has(t.accountId));
+  if (!accountsIn.length) return A.toast('This backup has no brokers in it.');
   const brokers = accountsIn.map(a => a.name).join(', ');
-  if (!await A.confirmDlg(`Import ${A.plural(accountsIn.length, 'broker')}?`, `${brokers}: ${A.plural(tradesIn.length, 'trade')} from “${file.name}” merge into this device. Newer versions win; nothing is deleted.`, 'Import', false)) return;
+  const v = await formDialog(`Import ${A.plural(accountsIn.length, 'broker')}?`, `
+    <p>${A.esc(brokers)}: ${A.plural(tradesIn.length, 'trade')} from “${A.esc(file.name)}”.</p>
+    ${A.S.brokerAccounts.length ? `<p>Without clearing, these merge into your ${A.plural(A.S.brokerAccounts.length, 'broker')}: newer versions win and nothing is deleted.</p>
+    <label class="switch"><input type="checkbox" name="clear"><span>Clear all existing brokers first. Their trades, holdings, overrides and notes are permanently removed from this device.</span></label>` : ''}`, 'Import');
+  if (!v) return;
+  if (v.clear) await clearBrokers();
 
   const merge = async (store, items, key, stamp) => {
     const index = new Map(A.S[store].map(x => [x[key], x]));
