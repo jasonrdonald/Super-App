@@ -300,6 +300,7 @@ const BACKUP_MARK = 'superapp-portfolio';
 
 const backupButtons = (add = '') => `<div class="btn-row">
     ${add}
+    ${add && A.S.brokerAccounts.length ? `<button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh all</span></button>` : ''}
     ${A.S.brokerAccounts.length ? `<button class="btn sm" data-act="pf-backup">${icon('download')}<span>Back up all brokers</span></button>` : ''}
     <label class="btn sm">${icon('upload')}<span>Import brokers</span><input id="pf-restore" type="file" accept=".json,application/json" hidden></label>
   </div>`;
@@ -412,11 +413,11 @@ function homeView(r) {
   const list = accounts();
   const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>`;
   const body = list.length
-    ? `<div class="pay-page">
+    ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
         <div class="status" id="pf-status">${statusLine()}</div>
         ${backupButtons(add)}
-        <div class="rows">${list.map(a => {
+        <div class="rows pf-accounts">${list.map(a => {
           const { summary: s, held } = computed(a);
           return `<a class="sub pf-account" href="${accountPath(a.id)}">
             <span class="sub-main"><span class="sub-text"><span class="card-title">${A.esc(a.name)}</span>
@@ -764,7 +765,7 @@ function stockView(r) {
       </div>
       ${p.lots.length ? `<section class="panel"><h2>Open lots</h2><div class="holdings-wrap"><table class="holdings lots">
         <thead><tr><th>Bought</th><th class="num">Original shares</th><th class="num">Change</th><th class="num">Current shares</th><th class="num">Cost per share</th><th class="num">Total cost</th><th class="num">Gain</th><th class="num">Gain %</th></tr></thead>
-        <tbody>${p.lots.map(l => {
+        <tbody>${[...p.lots].sort((a, b) => b.date.localeCompare(a.date)).map(l => {
           const gain = price == null ? null : l.qty * (price - l.price);
           const original = originalShares(l);
           const why = [...(l.source ? [l.source] : []), ...(l.steps ?? [])].join(' · ');
