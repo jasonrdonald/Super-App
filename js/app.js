@@ -3,6 +3,7 @@ import * as db from './db.js';
 import { renderMarkdown, toggleTask } from './markdown.js';
 import * as drive from './drive.js';
 import { CONFIG, VERSION } from './config.js';
+import { SECTIONS, DEFAULT_SECTION, sectionById } from './sections.js';
 
 const TRASH_DAYS = 30;
 const DAY = 24 * 60 * 60 * 1000;
@@ -37,6 +38,10 @@ const S = {
 const nbById = id => S.notebooks.find(n => n.id === id);
 const noteById = id => S.notes.find(n => n.id === id);
 const sortedNotebooks = () => [...S.notebooks].sort((a, b) => a.createdAt - b.createdAt);
+const subsOf = sectionId => sortedNotebooks().filter(nb => nb.sectionId === sectionId);
+const nbLabel = nb => `${sectionById(nb.sectionId).name} / ${nb.name}`;
+const nameTaken = (sectionId, name, exceptId) => subsOf(sectionId).some(nb => nb.id !== exceptId && nb.name.toLowerCase() === name.toLowerCase());
+const plural = (k, word) => `${k} ${word}${k === 1 ? '' : 's'}`;
 const clientId = () => CONFIG.googleClientId || ls.get('gClientId', '');
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 
@@ -143,9 +148,16 @@ async function persist(store, obj) {
   }
 }
 
-function newNotebook(name) {
+function newNotebook(name, sectionId = DEFAULT_SECTION) {
   const t = Date.now();
-  return { id: uid(), name, createdAt: t, updatedAt: t };
+  return { id: uid(), name, sectionId, createdAt: t, updatedAt: t };
+}
+
+async function createSubsection(sectionId, name) {
+  const nb = newNotebook(name, sectionId);
+  S.notebooks.push(nb);
+  await persist('notebooks', nb);
+  return nb;
 }
 
 async function createNote(notebookId) {
@@ -168,7 +180,7 @@ async function trashNote(n) {
 
 async function restoreNote(n) {
   const patch = { deletedAt: null };
-  if (!nbById(n.notebookId)) patch.notebookId = sortedNotebooks()[0].id;
+  if (!nbById(n.notebookId)) patch.notebookId = (sortedNotebooks()[0] ?? await createSubsection(DEFAULT_SECTION, 'General')).id;
   await updateNote(n, patch);
   toast(`Restored to ${nbById(n.notebookId).name}`);
   refresh();
@@ -199,7 +211,13 @@ const num = (v, d) => (Number.isFinite(v) ? v : d);
 function cleanNotebook(x) {
   if (!x || typeof x.id !== 'string') return null;
   const t = Date.now();
-  return { id: x.id, name: str(x.name, 80) || 'Notebook', createdAt: num(x.createdAt, t), updatedAt: num(x.updatedAt, t) };
+  return {
+    id: x.id,
+    name: str(x.name, 80) || 'Notebook',
+    sectionId: sectionById(x.sectionId) ? x.sectionId : DEFAULT_SECTION,
+    createdAt: num(x.createdAt, t),
+    updatedAt: num(x.updatedAt, t),
+  };
 }
 
 function cleanNote(x) {
@@ -299,6 +317,8 @@ async function autoBackup() {
 
 function parseRoute(hash) {
   const p = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (!p.length) return { name: 'home' };
+  if (p[0] === 's' && p[1]) return { name: 'section', section: p[1] };
   if (p[0] === 'nb' && p[1]) {
     if (p[2] === 'archive') return { name: 'archive', nb: p[1] };
     if (p[2] === 'm' && /^\d{4}-\d{2}$/.test(p[3] || '')) return { name: 'month', nb: p[1], month: p[3] };
@@ -310,16 +330,20 @@ function parseRoute(hash) {
   return null;
 }
 
-const routeValid = r => !!r && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id));
+const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id));
 
 function go(hash, replace = false) {
   if (replace) location.replace(hash);
   else location.hash = hash;
 }
 
-function defaultHash() {
-  const last = ls.get('lastList', '');
-  return routeValid(parseRoute(last)) ? last : `#/nb/${sortedNotebooks()[0].id}`;
+const defaultHash = () => '#/';
+
+// The section a route belongs to, or undefined for the main page, trash and settings.
+function routeSection(r) {
+  if (r?.section) return sectionById(r.section);
+  const nb = r?.nb ? nbById(r.nb) : r?.name === 'note' ? nbById(noteById(r.id)?.notebookId) : null;
+  return sectionById(nb?.sectionId);
 }
 
 function listHashFor(n) {
@@ -347,7 +371,6 @@ function onRoute() {
   S.route = r;
   S.query = '';
   if (r.nb && !S.open.has('nb:' + r.nb)) { S.open.add('nb:' + r.nb); ls.set('open', [...S.open]); }
-  if (['notebook', 'month', 'archive', 'trash'].includes(r.name)) ls.set('lastList', location.hash);
   if (r.name === 'note') {
     const n = noteById(r.id);
     S.mode = n.deletedAt || n.body.trim() ? 'preview' : 'edit';
@@ -359,6 +382,7 @@ function onRoute() {
 /* ---------- rendering ---------- */
 
 function render() {
+  applyTheme();
   renderDrawer();
   renderView();
 }
@@ -372,18 +396,23 @@ function refresh() {
 function renderView() {
   const r = S.route;
   if (r.name === 'note') noteView(noteById(r.id));
+  else if (r.name === 'home') homeView();
+  else if (r.name === 'section') sectionView(sectionById(r.section));
   else if (r.name === 'settings') settingsView();
   else listView(r);
 }
 
+// Only the current section's sub-sections appear here; the main page is how
+// you get to everything else.
 function renderDrawer() {
   const r = S.route || {};
+  const sec = routeSection(r);
   const thisYear = String(new Date().getFullYear());
   const trashCount = S.notes.filter(n => n.deletedAt).length;
   const row = (current, inner) => `<div class="row${current ? ' current' : ''}">${inner}</div>`;
   let tree = '';
 
-  for (const nb of sortedNotebooks()) {
+  for (const nb of sec ? subsOf(sec.id) : []) {
     const notes = S.notes.filter(n => n.notebookId === nb.id && !n.deletedAt);
     const active = notes.filter(n => !n.archived);
     const archived = notes.length - active.length;
@@ -392,7 +421,7 @@ function renderDrawer() {
       <button class="twisty" data-toggle="nb:${nb.id}" aria-expanded="${open}" aria-label="Show months">${icon('chevron')}</button>
       <a class="label" href="#/nb/${nb.id}">${icon('book')}<span>${esc(nb.name)}</span></a>
       <span class="count">${active.length || ''}</span>
-      <button class="icon-btn sm" data-act="nb-menu" data-id="${nb.id}" aria-label="Notebook options">${icon('dots')}</button>`)}`;
+      <button class="icon-btn sm" data-act="nb-menu" data-id="${nb.id}" aria-label="Sub-section options">${icon('dots')}</button>`)}`;
 
     if (open) {
       const years = {};
@@ -432,12 +461,19 @@ function renderDrawer() {
     tree += '</li>';
   }
 
+  const nav = sec
+    ? `${row(r.name === 'section', `
+        <a class="label" href="#/s/${sec.id}">${icon(sec.icon)}<span>${esc(sec.name)}</span></a>
+        <button class="icon-btn sm" data-act="new-notebook" data-id="${sec.id}" aria-label="New sub-section">${icon('plus')}</button>`)}
+      <ul class="tree">${tree}</ul>`
+    : `<div class="section-label"><span>Sections</span></div>
+      <ul class="tree">${SECTIONS.map(s => `<li>${row(false, `<a class="label" href="#/s/${s.id}">${icon(s.icon)}<span>${esc(s.name)}</span></a>`)}</li>`).join('')}</ul>`;
+
   drawer.innerHTML = `
     <div class="drawer-head"><span class="brand-mark">${icon('edit')}</span><span>Notes</span></div>
     <div class="drawer-scroll">
-      <div class="section-label"><span>Notebooks</span>
-        <button class="icon-btn sm" data-act="new-notebook" aria-label="New notebook">${icon('plus')}</button></div>
-      <ul class="tree">${tree}</ul>
+      ${row(r.name === 'home', `<a class="label" href="#/">${icon('home')}<span>All sections</span></a>`)}
+      ${nav}
     </div>
     <div class="drawer-foot">
       ${row(r.name === 'trash', `<a class="label" href="#/trash">${icon('trash')}<span>Trash</span></a><span class="count">${trashCount || ''}</span>`)}
@@ -445,26 +481,109 @@ function renderDrawer() {
     </div>`;
 }
 
-const menuButton = `<button class="icon-btn menu-btn" data-act="drawer" aria-label="Open notebooks">${icon('menu')}</button>`;
+const menuButton = `<button class="icon-btn menu-btn" data-act="drawer" aria-label="Open navigation">${icon('menu')}</button>`;
+const upButton = href => `<a class="icon-btn" href="${href}" aria-label="Back">${icon('back')}</a>`;
+
+function homeView() {
+  const countIn = sectionId => {
+    const ids = new Set(subsOf(sectionId).map(nb => nb.id));
+    return S.notes.filter(n => ids.has(n.notebookId) && !n.deletedAt && !n.archived).length;
+  };
+  view.innerHTML = `
+    <header class="topbar">
+      <div class="titles"><h1>Notes</h1><p>Choose a section</p></div>
+      ${menuButton}
+    </header>
+    <div class="scroll"><nav class="home" aria-label="Sections">${SECTIONS.map(s => {
+      const k = countIn(s.id);
+      return `<a class="tile" href="#/s/${s.id}" style="--tile:${s.light}">
+        <span class="tile-icon">${icon(s.icon)}</span>
+        <span class="tile-name">${esc(s.name)}</span>
+        <span class="tile-count">${k ? plural(k, 'note') : ''}</span>
+      </a>`;
+    }).join('')}</nav></div>`;
+}
+
+function subRow(nb) {
+  const notes = S.notes.filter(n => n.notebookId === nb.id && !n.deletedAt);
+  const archived = notes.filter(n => n.archived).length;
+  const active = notes.length - archived;
+  const meta = [active ? plural(active, 'note') : 'No notes yet', archived ? `${archived} archived` : ''].filter(Boolean).join(', ');
+  return `<div class="sub">
+    <a class="sub-main" href="#/nb/${nb.id}">
+      <span class="sub-icon">${icon('book')}</span>
+      <span class="sub-text"><span class="card-title">${esc(nb.name)}</span><span class="card-meta">${meta}</span></span>
+    </a>
+    <button class="icon-btn" data-act="new-note" data-id="${nb.id}" aria-label="New note in ${esc(nb.name)}">${icon('plus')}</button>
+    <button class="icon-btn" data-act="nb-menu" data-id="${nb.id}" aria-label="${esc(nb.name)} options">${icon('dots')}</button>
+  </div>`;
+}
+
+function sectionView(sec) {
+  const subs = subsOf(sec.id);
+  const ids = new Set(subs.map(nb => nb.id));
+  const noteCount = S.notes.filter(n => ids.has(n.notebookId) && !n.deletedAt && !n.archived).length;
+  const presets = sec.presets.filter(p => !nameTaken(sec.id, p));
+
+  view.innerHTML = `
+    <header class="topbar hero">
+      ${upButton('#/')}
+      <span class="hero-icon">${icon(sec.icon)}</span>
+      <div class="titles"><h1>${esc(sec.name)}</h1><p>${plural(subs.length, 'sub-section')}, ${plural(noteCount, 'note')}</p></div>
+      ${menuButton}
+    </header>
+    <div class="scroll"><div class="list section-list">
+      ${subs.map(subRow).join('')}
+      <div class="add-sub">
+        ${icon('plus')}
+        <select id="add-sub" aria-label="Add sub-section">
+          <option value="" selected hidden>Add sub-section</option>
+          ${presets.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}
+          <option value="custom">Custom sub-section…</option>
+        </select>
+        ${icon('chevron')}
+      </div>
+      ${subs.length ? '' : `<div class="empty">${icon(sec.icon)}<p>Add a sub-section to start taking notes in ${esc(sec.name)}.</p></div>`}
+    </div></div>`;
+
+  $('#add-sub').addEventListener('change', e => {
+    const opt = e.target.selectedOptions[0];
+    const preset = opt.value === 'custom' ? undefined : opt.value;
+    e.target.value = '';
+    addSubsection(sec.id, preset);
+  });
+}
 
 function listView(r) {
   const nb = r.nb && nbById(r.nb);
+  const sec = nb && sectionById(nb.sectionId);
   const title = r.name === 'trash' ? 'Trash' : nb.name;
   const sub = {
-    notebook: 'All notes',
+    notebook: sec?.name,
     month: monthLabel(r.month || '2000-01'),
-    archive: 'Archive',
+    archive: sec?.name,
     trash: `Deleted permanently after ${TRASH_DAYS} days`,
   }[r.name];
   const canCreate = r.name === 'notebook' || r.name === 'month';
   const showEmpty = r.name === 'trash' && S.notes.some(n => n.deletedAt);
+  const up = !nb ? '#/' : r.name === 'month' ? `#/nb/${nb.id}` : `#/s/${nb.sectionId}`;
+  const archived = nb ? S.notes.filter(n => n.notebookId === nb.id && !n.deletedAt && n.archived).length : 0;
+  const tabs = r.name === 'notebook' || r.name === 'archive'
+    ? `<div class="seg tabs" role="group" aria-label="Notes or archive">
+        <a href="#/nb/${nb.id}"${r.name === 'notebook' ? ' aria-current="page"' : ''}>${icon('file')}<span>Notes</span></a>
+        <a href="#/nb/${nb.id}/archive"${r.name === 'archive' ? ' aria-current="page"' : ''}>${icon('archive')}<span>Archive${archived ? ` (${archived})` : ''}</span></a>
+      </div>`
+    : '';
 
   view.innerHTML = `
     <header class="topbar">
-      ${menuButton}
+      ${upButton(up)}
       <div class="titles"><h1>${esc(title)}</h1><p>${esc(sub)}</p></div>
       ${showEmpty ? '<button class="btn sm danger" data-act="empty-trash">Empty trash</button>' : ''}
+      ${nb ? `<button class="icon-btn" data-act="nb-menu" data-id="${nb.id}" aria-label="Sub-section options">${icon('more')}</button>` : ''}
+      ${menuButton}
     </header>
+    ${tabs}
     <label class="search">${icon('search')}<input type="search" id="q" placeholder="Search notes" value="${esc(S.query)}" autocomplete="off" enterkeyhint="search"></label>
     <div class="scroll"><div class="list" id="list"></div></div>
     ${canCreate ? `<button class="fab" data-act="new-note" aria-label="New note">${icon('plus')}</button>` : ''}`;
@@ -490,8 +609,9 @@ function renderList() {
 
 function card(n, r) {
   const snip = plain(n.body).slice(0, 180);
+  const nb = nbById(n.notebookId);
   const meta = r.name === 'trash'
-    ? `${esc(nbById(n.notebookId)?.name ?? 'Deleted notebook')} · ${daysLeft(n)} days left`
+    ? `${esc(nb ? nbLabel(nb) : 'Deleted sub-section')} · ${daysLeft(n)} days left`
     : `Edited ${relDate(n.updatedAt)}`;
   return `<a class="card" href="#/note/${n.id}">
     <div class="card-title">${esc(n.title.trim() || 'Untitled')}</div>
@@ -551,7 +671,7 @@ function noteView(n) {
     <div class="note">
       <input class="note-title" id="title" placeholder="Title" maxlength="200" value="${esc(n.title)}" enterkeyhint="next"${ro}>
       <div class="note-meta">
-        ${nb ? `<a href="#/nb/${nb.id}">${icon('book')}${esc(nb.name)}</a>` : '<span>Deleted notebook</span>'}
+        ${nb ? `<a href="#/nb/${nb.id}">${icon('book')}${esc(nbLabel(nb))}</a>` : '<span>Deleted sub-section</span>'}
         <span>·</span><span>${fmt(n.createdAt, { dateStyle: 'medium' })}</span>
         <span class="saved" id="saved"></span>
       </div>
@@ -742,7 +862,7 @@ async function noteMenu(n) {
   }
   const k = await choose(n.title.trim() || 'Untitled', [
     { icon: 'archive', label: n.archived ? 'Unarchive' : 'Archive' },
-    { icon: 'folder', label: 'Move to notebook…' },
+    { icon: 'folder', label: 'Move to sub-section…' },
     { icon: 'share', label: 'Share or save as Markdown' },
     { icon: 'trash', label: 'Move to trash', danger: true },
   ]);
@@ -763,39 +883,49 @@ async function noteMenu(n) {
 }
 
 async function moveNote(n) {
-  const nbs = sortedNotebooks();
-  const k = await choose('Move to notebook', nbs.map(nb => ({ icon: 'book', label: nb.name, current: nb.id === n.notebookId })));
+  const nbs = SECTIONS.flatMap(s => subsOf(s.id));
+  const k = await choose('Move to sub-section', nbs.map(nb => ({ icon: 'book', label: nbLabel(nb), current: nb.id === n.notebookId })));
   if (k == null || nbs[k].id === n.notebookId) return;
   await updateNote(n, { notebookId: nbs[k].id });
-  toast(`Moved to ${nbs[k].name}`);
+  toast(`Moved to ${nbLabel(nbs[k])}`);
   render();
 }
 
-async function newNotebookFlow() {
-  const name = (await ask('New notebook', '', 'Notebook name'))?.trim();
+// Without a preset, asks for a custom name.
+async function addSubsection(sectionId, preset) {
+  const name = (preset ?? await ask('New sub-section', '', 'Sub-section name'))?.trim();
   if (!name) return;
-  const nb = newNotebook(name);
-  S.notebooks.push(nb);
-  await persist('notebooks', nb);
-  go(`#/nb/${nb.id}`);
+  if (nameTaken(sectionId, name)) return toast(`${name} already exists in ${sectionById(sectionId).name}`);
+  await createSubsection(sectionId, name);
+  toast(`Added ${name}`);
+  refresh();
 }
 
 async function notebookMenu(id) {
   const nb = nbById(id);
-  const last = S.notebooks.length < 2;
   const k = await choose(nb.name, [
     { icon: 'edit', label: 'Rename' },
-    { icon: 'trash', label: last ? 'Delete (keep at least one notebook)' : 'Delete notebook', danger: true, disabled: last },
+    { icon: 'folder', label: 'Move to section…' },
+    { icon: 'trash', label: 'Delete sub-section', danger: true },
   ]);
   if (k === 0) {
-    const name = (await ask('Rename notebook', nb.name))?.trim();
+    const name = (await ask('Rename sub-section', nb.name))?.trim();
     if (!name) return;
+    if (nameTaken(nb.sectionId, name, nb.id)) return toast(`${name} already exists in ${sectionById(nb.sectionId).name}`);
     Object.assign(nb, { name, updatedAt: Date.now() });
     await persist('notebooks', nb);
     render();
   } else if (k === 1) {
+    const j = await choose('Move to section', SECTIONS.map(s => ({ icon: s.icon, label: s.name, current: s.id === nb.sectionId })));
+    if (j == null || SECTIONS[j].id === nb.sectionId) return;
+    if (nameTaken(SECTIONS[j].id, nb.name)) return toast(`${nb.name} already exists in ${SECTIONS[j].name}`);
+    Object.assign(nb, { sectionId: SECTIONS[j].id, updatedAt: Date.now() });
+    await persist('notebooks', nb);
+    toast(`Moved to ${SECTIONS[j].name}`);
+    render();
+  } else if (k === 2) {
     const notes = S.notes.filter(n => n.notebookId === id && !n.deletedAt);
-    const msg = notes.length ? `Its ${notes.length} note${notes.length > 1 ? 's' : ''} will be moved to the trash.` : 'This notebook is empty.';
+    const msg = notes.length ? `Its ${notes.length} note${notes.length > 1 ? 's' : ''} will be moved to the trash.` : 'This sub-section is empty.';
     if (!await confirmDlg(`Delete “${nb.name}”?`, msg, 'Delete')) return;
     const t = Date.now();
     notes.forEach(n => Object.assign(n, { deletedAt: t, updatedAt: t }));
@@ -803,9 +933,9 @@ async function notebookMenu(id) {
     S.notebooks = S.notebooks.filter(x => x !== nb);
     await db.del('notebooks', id);
     markDirty();
-    toast('Notebook deleted');
+    toast('Sub-section deleted');
     const r = S.route;
-    if (r.nb === id || (r.name === 'note' && noteById(r.id)?.notebookId === id)) go(`#/nb/${sortedNotebooks()[0].id}`, true);
+    if (r.nb === id || (r.name === 'note' && noteById(r.id)?.notebookId === id)) go(`#/s/${nb.sectionId}`, true);
     else render();
   }
 }
@@ -827,10 +957,21 @@ function applyTheme() {
   if (t === 'system') delete root.dataset.theme;
   else root.dataset.theme = t;
   const dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+  // Each section recolours the app; the main page, trash and settings stay neutral.
+  const sec = routeSection(S.route);
+  if (sec) {
+    root.dataset.section = sec.id;
+    root.style.setProperty('--accent', dark ? sec.dark : sec.light);
+    root.style.setProperty('--tile', sec.light);
+  } else {
+    delete root.dataset.section;
+    root.style.removeProperty('--accent');
+    root.style.removeProperty('--tile');
+  }
   document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.remove());
   const meta = document.createElement('meta');
   meta.name = 'theme-color';
-  meta.content = dark ? '#131416' : '#f5f3ee';
+  meta.content = sec ? sec.light : dark ? '#131416' : '#f5f3ee';
   document.head.append(meta);
 }
 
@@ -870,7 +1011,7 @@ function settingsView() {
     : ios ? `<section><h2>Install</h2><p class="muted">In Safari, tap Share, then “Add to Home Screen” to install this app.</p></section>` : '';
 
   view.innerHTML = `
-    <header class="topbar">${menuButton}<div class="titles"><h1>Settings</h1><p>Appearance, storage and backup</p></div></header>
+    <header class="topbar">${upButton('#/')}<div class="titles"><h1>Settings</h1><p>Appearance, storage and backup</p></div>${menuButton}</header>
     <div class="scroll"><div class="settings">
       ${install}
       <section>
@@ -887,7 +1028,7 @@ function settingsView() {
           ${canShare ? `<button class="btn" data-act="share-backup">${icon('share')}<span>Share backup</span></button>` : ''}
           <label class="btn">${icon('upload')}<span>Import backup</span><input type="file" id="import" accept=".json,application/json" hidden></label>
         </div>
-        <p class="muted small">Backups are a single .json file with every notebook and note. Importing merges: newer versions win and nothing is deleted.</p>
+        <p class="muted small">Backups are a single .json file with every sub-section and note. Importing merges: newer versions win and nothing is deleted.</p>
       </section>
       <section><h2>Google Drive backup</h2>${driveSection()}</section>
       <section>
@@ -926,7 +1067,7 @@ function settingsView() {
 
 async function fillStorageInfo() {
   const live = S.notes.filter(n => !n.deletedAt).length;
-  const parts = [`${live} note${live === 1 ? '' : 's'} in ${S.notebooks.length} notebook${S.notebooks.length === 1 ? '' : 's'}`];
+  const parts = [`${plural(live, 'note')} in ${plural(S.notebooks.length, 'sub-section')}`];
   try {
     const est = await navigator.storage?.estimate?.();
     if (est?.usage != null) parts.push(`${fmtBytes(est.usage)} used`);
@@ -961,7 +1102,7 @@ drawer.addEventListener('click', e => {
     return;
   }
   const a = e.target.closest('[data-act]');
-  if (a?.dataset.act === 'new-notebook') return newNotebookFlow();
+  if (a?.dataset.act === 'new-notebook') return addSubsection(a.dataset.id);
   if (a?.dataset.act === 'nb-menu') return notebookMenu(a.dataset.id);
   if (e.target.closest('a')) closeDrawer();
 });
@@ -976,7 +1117,8 @@ view.addEventListener('click', async e => {
   switch (b.dataset.act) {
     case 'drawer': return openDrawer();
     case 'back': return goBack();
-    case 'new-note': return createNote(r.nb);
+    case 'new-note': return createNote(b.dataset.id ?? r.nb);
+    case 'nb-menu': return notebookMenu(b.dataset.id);
     case 'note-menu': return noteMenu(n);
     case 'restore': await restoreNote(n); return render();
     case 'unarchive': await updateNote(n, { archived: false }); return render();
@@ -1059,10 +1201,11 @@ async function init() {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;
     return;
   }
-  if (!S.notebooks.length) {
-    const nb = newNotebook('My Notes');
-    S.notebooks.push(nb);
-    await db.put('notebooks', nb);
+  // Notebooks from before sections existed become sub-sections of Personal.
+  const stray = S.notebooks.filter(nb => !sectionById(nb.sectionId));
+  if (stray.length) {
+    stray.forEach(nb => { nb.sectionId = DEFAULT_SECTION; });
+    await db.putMany('notebooks', stray);
   }
   await purgeTrash();
   setInterval(purgeTrash, 60 * 60 * 1000);

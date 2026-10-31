@@ -4,7 +4,8 @@ An offline-first Markdown notes PWA for phones. Plain HTML/CSS/JS: no build step
 
 ## Features
 
-- **Notebooks**: create, rename and delete them. Each one has a navigation tree grouped by **year → month** (by creation date) and its own **Archive**.
+- **Sections**: the main page shows Personal, Payments, Family, Household, Vehicles, Finance and Work as app icons. Choosing one recolours the app.
+- **Sub-sections**: add them inside a section from a dropdown of suggestions, or name your own. Each one is its own notebook that you can rename, move to another section or delete, with a navigation tree grouped by **year → month** (by creation date) and its own **Archive**.
 - **Markdown notes** with Edit/Preview modes. The formatting toolbar inserts Markdown for bold, italic, strikethrough, headings, bullet/numbered/check lists, quotes, inline code, code blocks, links, dividers and indent/outdent. Pressing Enter continues a list. Checkboxes can be ticked in Preview.
 - **Supported Markdown**: headings, emphasis, `~~strike~~`, `==highlight==`, lists, task lists, quotes, code, tables, links, images and auto-links. Raw HTML is always escaped.
 - **Dark theme**: follows the system setting, or you can force Light or Dark in Settings.
@@ -38,6 +39,7 @@ The app only requests `drive.file`, so it can see only the files it creates, not
 | `index.html` | App shell |
 | `css/styles.css` | Styles, light/dark tokens |
 | `js/app.js` | Routing, views, editor, backup, trash |
+| `js/sections.js` | Sections: names, icons, colours, suggested sub-sections |
 | `js/markdown.js` | Safe Markdown renderer |
 | `js/db.js` | IndexedDB storage |
 | `js/drive.js` | Google sign-in + Drive upload/download |

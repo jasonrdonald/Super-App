@@ -1,5 +1,5 @@
 // Offline app shell. Bump VERSION when shipping changes so clients update.
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.1.0';
 const CACHE = `notes-${VERSION}`;
 const ASSETS = [
   './',
@@ -12,6 +12,7 @@ const ASSETS = [
   'js/drive.js',
   'js/icons.js',
   'js/markdown.js',
+  'js/sections.js',
   'icons/icon.svg',
   'icons/icon-192.png',
   'icons/icon-512.png',
