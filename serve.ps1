@@ -17,19 +17,24 @@ try {
   while ($listener.IsListening) {
     $ctx = $listener.GetContext()
     $res = $ctx.Response
-    $rel = [Uri]::UnescapeDataString($ctx.Request.Url.AbsolutePath.TrimStart('/'))
-    if ($rel -eq '') { $rel = 'index.html' }
-    $file = [IO.Path]::GetFullPath((Join-Path $root $rel))
-    if ($file.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path $file -PathType Leaf)) {
-      $bytes = [IO.File]::ReadAllBytes($file)
-      $ext = [IO.Path]::GetExtension($file).ToLower()
-      $res.ContentType = if ($mime.ContainsKey($ext)) { $mime[$ext] } else { 'application/octet-stream' }
-      $res.Headers['Cache-Control'] = 'no-cache'
-      $res.OutputStream.Write($bytes, 0, $bytes.Length)
-    } else {
-      $res.StatusCode = 404
+    # One failed request (a dropped connection, say) must not stop the server.
+    try {
+      $rel = [Uri]::UnescapeDataString($ctx.Request.Url.AbsolutePath.TrimStart('/'))
+      if ($rel -eq '') { $rel = 'index.html' }
+      $file = [IO.Path]::GetFullPath((Join-Path $root $rel))
+      if ($file.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path $file -PathType Leaf)) {
+        $bytes = [IO.File]::ReadAllBytes($file)
+        $ext = [IO.Path]::GetExtension($file).ToLower()
+        $res.ContentType = if ($mime.ContainsKey($ext)) { $mime[$ext] } else { 'application/octet-stream' }
+        $res.Headers['Cache-Control'] = 'no-cache'
+        if ($ctx.Request.HttpMethod -ne 'HEAD') { $res.OutputStream.Write($bytes, 0, $bytes.Length) }
+      } else {
+        $res.StatusCode = 404
+      }
+    } catch {
+      Write-Warning "$($ctx.Request.HttpMethod) $($ctx.Request.Url.AbsolutePath): $_"
     }
-    $res.Close()
+    try { $res.Close() } catch {}
   }
 } finally {
   $listener.Stop()

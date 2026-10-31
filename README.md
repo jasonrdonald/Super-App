@@ -1,4 +1,4 @@
-# SuperApp Notes
+# SuperApp
 
 An offline-first Markdown notes PWA for phones. Plain HTML/CSS/JS: no build step and no dependencies.
 

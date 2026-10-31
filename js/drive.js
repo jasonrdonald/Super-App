@@ -80,7 +80,7 @@ async function findBackup() {
 export async function upload(data) {
   const existing = await findBackup();
   const boundary = 'notes' + Math.random().toString(36).slice(2);
-  const meta = existing ? {} : { name: FILE_NAME, mimeType: 'application/json', description: 'SuperApp Notes backup' };
+  const meta = existing ? {} : { name: FILE_NAME, mimeType: 'application/json', description: 'SuperApp backup' };
   const body =
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(data)}\r\n--${boundary}--`;

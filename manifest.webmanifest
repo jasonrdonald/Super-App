@@ -1,8 +1,8 @@
 {
   "id": "./",
-  "name": "SuperApp Notes",
-  "short_name": "Notes",
-  "description": "Offline-first Markdown notes with notebooks, archive, trash and Google Drive backup.",
+  "name": "SuperApp",
+  "short_name": "SuperApp",
+  "description": "Offline-first Markdown notes organised into life sections, with archive, trash and Google Drive backup.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

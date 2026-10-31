@@ -239,7 +239,7 @@ function cleanNote(x) {
 // most recently updated version wins; nothing local is deleted.
 async function importData(data) {
   if (!data || data.app !== 'superapp-notes' || !Array.isArray(data.notebooks) || !Array.isArray(data.notes)) {
-    throw new Error('This file is not a SuperApp Notes backup.');
+    throw new Error('This file is not a SuperApp backup.');
   }
   let added = 0, updated = 0;
   const merge = (list, item, count) => {
@@ -470,7 +470,7 @@ function renderDrawer() {
       <ul class="tree">${SECTIONS.map(s => `<li>${row(false, `<a class="label" href="#/s/${s.id}">${icon(s.icon)}<span>${esc(s.name)}</span></a>`)}</li>`).join('')}</ul>`;
 
   drawer.innerHTML = `
-    <div class="drawer-head"><span class="brand-mark">${icon('edit')}</span><span>Notes</span></div>
+    <div class="drawer-head"><span class="brand-mark">${icon('edit')}</span><span>SuperApp</span></div>
     <div class="drawer-scroll">
       ${row(r.name === 'home', `<a class="label" href="#/">${icon('home')}<span>All sections</span></a>`)}
       ${nav}
@@ -491,7 +491,7 @@ function homeView() {
   };
   view.innerHTML = `
     <header class="topbar">
-      <div class="titles"><h1>Notes</h1><p>Choose a section</p></div>
+      <div class="titles"><h1>SuperApp</h1><p>Choose a section</p></div>
       ${menuButton}
     </header>
     <div class="scroll"><nav class="home" aria-label="Sections">${SECTIONS.map(s => {
@@ -1036,7 +1036,7 @@ function settingsView() {
         <p class="muted">Notes in the trash are deleted permanently after ${TRASH_DAYS} days.</p>
         <button class="btn danger" data-act="empty-trash"${trashCount ? '' : ' disabled'}>${icon('trash')}<span>Empty trash (${trashCount})</span></button>
       </section>
-      <p class="muted center small">SuperApp Notes v${VERSION}</p>
+      <p class="muted center small">SuperApp v${VERSION}</p>
     </div></div>`;
 
   view.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('click', () => {
@@ -1124,7 +1124,7 @@ view.addEventListener('click', async e => {
     case 'unarchive': await updateNote(n, { archived: false }); return render();
     case 'empty-trash': return emptyTrash();
     case 'export': return downloadFile(backupFile());
-    case 'share-backup': return shareOrDownload(backupFile(), 'Notes backup');
+    case 'share-backup': return shareOrDownload(backupFile(), 'SuperApp backup');
     case 'install':
       S.installPrompt?.prompt();
       S.installPrompt = null;
@@ -1163,7 +1163,7 @@ view.addEventListener('click', async e => {
 });
 
 function backupFile() {
-  const name = `notes-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  const name = `superapp-backup-${new Date().toISOString().slice(0, 10)}.json`;
   return new File([JSON.stringify(snapshot(), null, 2)], name, { type: 'application/json' });
 }
 
