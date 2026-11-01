@@ -362,6 +362,14 @@ export function summarizeAll(rows) {
   };
 }
 
+// The cost of the shares held at the end of `date`: lots bought by then, plus
+// sold lots that hadn't been sold yet. Splits don't change a lot's total cost.
+export function costHeldAt(p, date) {
+  const open = p.lots.filter(l => l.date <= date).reduce((n, l) => n + l.qty * l.price, 0);
+  const later = p.realized.filter(r => r.buyDate <= date && r.sellDate > date).reduce((n, r) => n + r.qty * r.cost, 0);
+  return open + later;
+}
+
 export const positionQty = p => qtyOf(p.lots);
 export const positionCost = p => costOf(p.lots);
 

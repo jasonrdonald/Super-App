@@ -1,4 +1,4 @@
-export const VERSION = '1.10.1';
+export const VERSION = '1.10.3';
 
 export const CONFIG = {
   // Google OAuth 2.0 Web Client ID for Drive backup (see README.md).

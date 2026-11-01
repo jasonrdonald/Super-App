@@ -455,7 +455,8 @@ a { color: inherit; text-decoration: none; }
 .pay-page > .btn-row { margin-bottom: 0; }
 .pf-start .btn-row { justify-content: center; }
 .pf-filters { flex-wrap: wrap; }
-.pf-detail { flex: none; margin: 0 0 0 auto; color: var(--text); }
+.pf-checks { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-left: auto; }
+.pf-detail { flex: none; margin: 0; color: var(--text); }
 .pf-link { color: var(--accent); font-weight: 650; }
 .months.long { display: flex; gap: 2px; overflow-x: auto; padding-bottom: 4px; }
 .months.long .month { flex: 1 0 14px; }

@@ -1,7 +1,7 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
-import { ISSUE_LABEL, xirr, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote, cleanMarket } from './portfolio.js';
+import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
 import { stockQuotes, usQuotes, usdInr, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
 import { tickerFor, companyPart } from './tickers.js';
@@ -920,7 +920,7 @@ function reportBrokers() {
   return list.map(a => ({ account: a, c: computed(a), rate: shown === CONFIG.currency && isUsd(a) ? fxRate() ?? 0 : 1 }));
 }
 
-function reportFilters(years) {
+function reportFilters(years, extra = '') {
   const year = years.includes(Number(R.year)) ? R.year : 'all';
   R.year = year;
   return `<div class="pf-sort pf-filters">
@@ -928,11 +928,12 @@ function reportFilters(years) {
     <select class="select" id="r-broker"><option value="all">All brokers</option>${accounts().map(a => `<option value="${a.id}"${a.id === R.broker ? ' selected' : ''}>${A.esc(a.name)}</option>`).join('')}</select>
     <label for="r-year">Year</label>
     <select class="select" id="r-year"><option value="all">All years</option>${years.map(y => `<option value="${y}"${String(y) === String(year) ? ' selected' : ''}>${fyName(y)}</option>`).join('')}</select>
-    <label class="switch pf-detail"><input type="checkbox" id="r-detail"${detailed() ? ' checked' : ''}><span>Detailed report</span></label>
+    <span class="pf-checks">${extra}<label class="switch pf-detail"><input type="checkbox" id="r-detail"${detailed() ? ' checked' : ''}><span>Detailed report</span></label></span>
   </div>`;
 }
 
 const detailed = () => A.ls.get('pfReportDetail', false);
+const payersOnly = () => A.ls.get('pfPayersOnly', false);
 
 const inYear = date => R.year === 'all' || fyStart(date) === Number(R.year);
 
@@ -972,10 +973,12 @@ function dividendReport() {
   const brokers = reportBrokers();
   const all = brokers.flatMap(({ account, c, rate }) => [...c.positions.values()].flatMap(p => p.dividendEvents.map(d => ({ ...d, amount: d.amount * rate, symbol: p.symbol, account }))));
   const years = [...new Set(all.map(d => fyStart(d.date)))].sort((a, b) => b - a);
-  const filters = reportFilters(years);
+  const filters = reportFilters(years, `<label class="switch pf-detail"><input type="checkbox" id="r-payers"${payersOnly() ? ' checked' : ''}><span>Paying stocks only</span></label>`);
   const rows = all.filter(d => inYear(d.date));
   const total = rows.reduce((n, d) => n + d.amount, 0);
-  const cost = brokers.reduce((n, { c, rate }) => n + c.held.reduce((m, l) => m + l.cost * rate, 0), 0);
+  const today = new Date().toISOString().slice(0, 10);
+  const yearEnd = `${Number(R.year) + 1}-03-31`;
+  const end = R.year === 'all' || yearEnd > today ? today : yearEnd;
   const byMonth = new Map();
   rows.forEach(d => byMonth.set(monthKey(d.date), (byMonth.get(monthKey(d.date)) ?? 0) + d.amount));
   const byStock = new Map();
@@ -984,30 +987,50 @@ function dividendReport() {
     const row = byStock.get(key) ?? { symbol: d.symbol, account: d.account, amount: 0, count: 0 };
     row.amount += d.amount;
     row.count++;
+    if (d.date > (row.last ?? '')) row.last = d.date;
     byStock.set(key, row);
   }
-  const costOf = row => {
+  // What was invested in a stock by the period's end. One sold before then still
+  // earned its dividends, so it counts at what was held when it last paid.
+  const baseOf = row => {
     const { c, rate } = brokers.find(b => b.account === row.account);
-    const line = c.held.find(l => l.symbol === row.symbol);
-    return line ? line.cost * rate : 0;
+    const p = c.positions.get(row.symbol);
+    if (!p) return 0;
+    return (costHeldAt(p, end) || (row.last ? costHeldAt(p, row.last) : 0)) * rate;
   };
-  const list = [...byStock.values()].sort((a, b) => b.amount - a.amount);
+  const payers = [...byStock.values()];
+  // What was held at the period's end. Funds are left out of the count, as most pay nothing.
+  const stocks = brokers.flatMap(({ account, c }) => c.lines
+    .filter(l => l.group !== 'Mutual funds' && costHeldAt(c.positions.get(l.symbol), end) > 0)
+    .map(l => ({ symbol: l.symbol, account, amount: 0, count: 0 })));
+  const quiet = stocks.filter(s => !byStock.has(`${s.account.id}:${s.symbol}`));
+  const payingCost = payers.reduce((n, p) => n + baseOf(p), 0);
+  const heldAtEnd = brokers.reduce((n, { c, rate }) => n + [...c.positions.values()].reduce((m, p) => m + costHeldAt(p, end) * rate, 0), 0);
+  // Payers sold before the end count in the overall base too, so it covers the same dividends.
+  const allCost = heldAtEnd + payers.reduce((n, p) => {
+    const { c } = brokers.find(b => b.account === p.account);
+    return n + (costHeldAt(c.positions.get(p.symbol), end) ? 0 : baseOf(p));
+  }, 0);
+  const yieldText = (amount, base) => (base ? `${(amount / base * 100).toFixed(2)}%` : '–');
+  const list = [...payers, ...(payersOnly() ? [] : quiet)].sort((a, b) => b.amount - a.amount);
   return `${filters}
     <div class="stats">
       ${stat(`Total dividends${info('dividends')}`, money(total), A.plural(rows.length, 'payment'))}
-      ${stat(`Dividend yield at cost${info('yieldOnCost')}`, cost ? `${(total / cost * 100).toFixed(2)}%` : '–', R.year === 'all' ? 'All years together' : 'For this year')}
-      ${stat('Stocks that paid', String(list.length), '')}
-      ${stat('Cost of current holdings', money(cost), 'The base for the yield')}
+      ${stat(`Yield at cost: paying / overall${info('yieldOnCost')}`, `${yieldText(total, payingCost)} / ${yieldText(total, allCost)}`, R.year === 'all' ? 'All years together' : 'For this year')}
+      ${stat('Stocks that paid / total stocks', `${payers.length} / ${payers.length + quiet.length}`, `Held by ${day(end)}, plus any sold that paid`)}
+      ${payersOnly()
+        ? stat('Cumulative invested in payers', money(payingCost), `To ${day(end)}, base for the paying yield`)
+        : stat('Cumulative invested', money(allCost), `To ${day(end)}, base for the overall yield`)}
     </div>
     ${monthBars(byMonth)}
     ${!list.length ? `<div class="empty">${icon('file')}<p>No dividends for this selection.</p></div>` : !detailed() ? '' : `<section class="panel"><h2>By stock</h2><div class="holdings-wrap"><table class="holdings lots">
       <thead><tr><th>Stock</th><th>Broker</th><th class="num">Payments</th><th class="num">Dividends</th><th class="num">Yield at cost</th></tr></thead>
       <tbody>${list.map(row => {
-        const base = costOf(row);
+        const base = baseOf(row);
         return `<tr><td><a class="pf-link" href="${accountPath(row.account.id)}/h/${encodeURIComponent(row.symbol)}">${A.esc(row.symbol)}</a></td><td>${A.esc(row.account.name)}</td><td class="num">${row.count}</td><td class="num">${money(row.amount)}</td><td class="num">${base ? `${(row.amount / base * 100).toFixed(2)}%` : '–'}</td></tr>`;
       }).join('')}</tbody>
     </table></div></section>`}
-    <p class="muted small">Before tax. Worked out from Yahoo Finance dividend history and what you held on each ex-date, so it may differ slightly from what reached your bank. Yield is on the cost of what you hold now.</p>`;
+    <p class="muted small">Before tax. Worked out from Yahoo Finance dividend history and what you held on each ex-date, so it may differ slightly from what reached your bank. Yield is on the cumulative amount invested up to the end of the selected period, net of shares sold by then.</p>`;
 }
 
 // Over 12 months is long term, or over 24 for shares held abroad.
@@ -1073,6 +1096,7 @@ function reportsView(r) {
   A.$('#r-broker').addEventListener('change', e => { R.broker = e.target.value; reportsView(r); });
   A.$('#r-year').addEventListener('change', e => { R.year = e.target.value; reportsView(r); });
   A.$('#r-detail').addEventListener('change', e => { A.ls.set('pfReportDetail', e.target.checked); reportsView(r); });
+  A.$('#r-payers')?.addEventListener('change', e => { A.ls.set('pfPayersOnly', e.target.checked); reportsView(r); });
 }
 
 /* ---------- one stock ---------- */
