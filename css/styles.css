@@ -446,7 +446,7 @@ a { color: inherit; text-decoration: none; }
 @media (max-width: 560px) {
   .stats.five { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stats.five .stat-value { font-size: 1.12rem; }
-  .stats.five > :last-child { grid-column: 1 / -1; }
+  .stats.five > :last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
 .pf-account { padding-right: 12px; }
 .pf-start { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-top: 14px; }
@@ -454,6 +454,12 @@ a { color: inherit; text-decoration: none; }
 .pf-or .muted.small { margin: 0 0 8px; }
 .pay-page > .btn-row { margin-bottom: 0; }
 .pf-start .btn-row { justify-content: center; }
+.pf-filters { flex-wrap: wrap; }
+.pf-detail { flex: none; margin: 0 0 0 auto; color: var(--text); }
+.pf-link { color: var(--accent); font-weight: 650; }
+.months.long { display: flex; gap: 2px; overflow-x: auto; padding-bottom: 4px; }
+.months.long .month { flex: 1 0 14px; }
+.months.long .month-name { min-height: 1.1em; overflow: visible; white-space: nowrap; }
 .pf-info { display: inline-grid; place-items: center; width: 20px; height: 20px; margin-left: 2px; padding: 0; border: 0; background: none; color: var(--muted); vertical-align: -4px; flex: none; }
 .pf-info .i { width: 13px; height: 13px; }
 .pf-info:hover { color: var(--accent); }

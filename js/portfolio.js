@@ -211,6 +211,46 @@ export function replay(trades, actions, dividends = [], fractional = false) {
   return state;
 }
 
+/* ---------- returns ---------- */
+
+const dayNumber = s => Date.UTC(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, Number(s.slice(8, 10))) / 864e5;
+
+// Annual return on dated cash flows, as a percentage: money in is negative, money
+// out positive. Null when there's nothing to solve, such as all flows on one day.
+export function xirr(flows) {
+  const list = flows.filter(f => f.amount);
+  if (!list.some(f => f.amount > 0) || !list.some(f => f.amount < 0)) return null;
+  const days = list.map(f => dayNumber(f.date));
+  const first = Math.min(...days);
+  if (Math.max(...days) === first) return null;
+  const terms = list.map((f, i) => [f.amount, (days[i] - first) / 365]);
+  const npv = rate => terms.reduce((n, [amount, years]) => n + amount / (1 + rate) ** years, 0);
+  let low = -0.9999, high = 100;
+  let atLow = npv(low);
+  if (atLow * npv(high) > 0) return null;
+  for (let i = 0; i < 80; i++) {
+    const mid = (low + high) / 2;
+    const at = npv(mid);
+    if (atLow * at > 0) { low = mid; atLow = at; } else high = mid;
+  }
+  return (low + high) / 2 * 100;
+}
+
+// What went in and came out of a holding. Lots are used rather than trades, so a
+// merger or demerger keeps the original dates and cost.
+function cashFlows(p, value) {
+  const flows = [];
+  if (value != null) {
+    p.lots.forEach(l => flows.push({ date: l.date, amount: -l.qty * l.price }));
+    if (value) flows.push({ date: new Date().toISOString().slice(0, 10), amount: value });
+  }
+  p.realized.forEach(r => {
+    flows.push({ date: r.buyDate, amount: -r.qty * r.cost }, { date: r.sellDate, amount: r.qty * r.price });
+  });
+  p.dividendEvents.forEach(d => flows.push({ date: d.date, amount: d.amount }));
+  return flows;
+}
+
 /* ---------- holdings ---------- */
 
 // The curated list plus Yahoo's splits. A curated entry wins over a Yahoo one
@@ -283,7 +323,9 @@ export function summarizePosition(p, quote) {
   const dayGain = prev == null ? null : qty * quote.change;
   const yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
   const dividends12m = p.dividendEvents.filter(d => d.date >= yearAgo).reduce((n, d) => n + d.amount, 0);
+  const flows = cashFlows(p, value);
   return {
+    flows, xirr: xirr(flows),
     dividends12m, yieldOnCost: cost > 0 ? dividends12m / cost * 100 : null,
     symbol: p.symbol, qty, avg: qty > EPS ? cost / qty : 0, price, cost, value,
     dividends: p.dividends,
@@ -307,6 +349,7 @@ export function summarizeAll(rows) {
   const prevValue = value - dayGain;
   const soldCost = sum('soldCost');
   return {
+    xirr: xirr(rows.flatMap(r => r.flows ?? [])),
     // Dividends on what's sold are in here too, so this runs a little high after a big sale.
     yieldOnCost: sum('cost') ? sum('dividends12m') / sum('cost') * 100 : null,
     realizedPct: soldCost ? sum('realized') / soldCost * 100 : null,

@@ -7,7 +7,7 @@ import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } 
 import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
 import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote as cleanPortfolioNote } from './portfolio.js';
-import { initPortfolio, disclosureView, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTotal, portfolioChanged } from './portfolio-view.js';
+import { initPortfolio, disclosureView, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTileText, portfolioChanged } from './portfolio-view.js';
 
 const TRASH_DAYS = 30;
 const DAY = 24 * 60 * 60 * 1000;
@@ -352,6 +352,7 @@ function parseRoute(hash) {
     const base = { name: 'portfolio', section: p[1] };
     if (!p[2]) return { ...base, page: 'home' };
     if (p[2] === 'add') return { ...base, page: 'add' };
+    if (p[2] === 'reports') return { ...base, page: 'reports', tab: p[3] };
     if (p[2] !== 'a' || !p[3]) return null;
     if (p[4] === 'h') return { ...base, page: 'stock', id: p[3], symbol: p[5] };
     return { ...base, page: p[4] || 'account', id: p[3] };
@@ -505,7 +506,7 @@ function renderDrawer() {
 
   const payPage = ['add', 'edit', 'p'].includes(r.page) ? 'manage' : r.page;
   const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.app ? portfolioNav() : [];
-  const current = sec?.id === 'payments' ? payPage : r.id ?? 'home';
+  const current = sec?.id === 'payments' ? payPage : r.page === 'reports' ? 'reports' : r.id ?? 'home';
   const nav = sec?.app
     ? `<div class="section-label"><span>${esc(sec.name)}</span></div>
       <ul class="tree">${pages.map(p => `<li>${row(current === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${esc(p.name)}</span></a>`)}</li>`).join('')}</ul>`
@@ -542,7 +543,7 @@ function homeView() {
   const dues = attentionNow();
   const tileCount = s => {
     if (s.id === 'payments') return dues.length ? `${dues.length} to pay` : '';
-    if (s.app) return S.brokerAccounts.length ? new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, maximumFractionDigits: 0 }).format(portfolioTotal().value) : '';
+    if (s.app) return S.brokerAccounts.length ? portfolioTileText() : '';
     const k = countIn(s.id);
     return k ? plural(k, 'note') : '';
   };

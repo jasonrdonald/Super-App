@@ -1,7 +1,7 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
-import { ISSUE_LABEL, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote, cleanMarket } from './portfolio.js';
+import { ISSUE_LABEL, xirr, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
 import { stockQuotes, usQuotes, usdInr, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
 import { tickerFor, companyPart } from './tickers.js';
@@ -22,8 +22,8 @@ const COLUMNS = [
   { key: 'symbol', label: 'Ticker', text: true },
   { key: 'name', label: 'Stock name', text: true },
   { key: 'qty', label: 'Shares', f: v => qtyText(v) },
-  { key: 'avg', label: 'Cost per share', f: v => money(v) },
-  { key: 'price', label: 'Last price', f: v => money(v), src: 'price' },
+  { key: 'avg', label: 'Cost per share', f: v => perShare(v) },
+  { key: 'price', label: 'Last price', f: v => perShare(v), src: 'price' },
   { key: 'cost', label: 'Total cost', f: v => money(v) },
   { key: 'value', label: 'Market value', f: v => money(v), src: 'price' },
   { key: 'dividends', label: 'Total div income', f: v => money(v), src: 'dividends', sub: r => yieldLine(r.yieldOnCost) },
@@ -31,6 +31,7 @@ const COLUMNS = [
   { key: 'dayGain', label: 'Day gain', f: v => money(v, true), tone: true, src: 'price' },
   { key: 'gainPct', label: 'Total gain %', f: v => pct(v), tone: true, src: 'gain' },
   { key: 'gain', label: 'Total gain', f: v => money(v, true), tone: true, src: 'gain' },
+  { key: 'xirr', label: 'XIRR', f: v => pct(v), tone: true, src: 'xirr' },
   { key: 'realizedPct', label: 'Realized gain %', f: v => pct(v), tone: true },
   { key: 'realized', label: 'Realized gain', f: v => money(v, true), tone: true },
 ];
@@ -56,7 +57,7 @@ const OPTIONAL = [
     { key: 'payout', label: 'Payout ratio', f: plainPct, src: 'quality' },
   ] },
   { group: 'Valuation', cols: [
-    { key: 'eps', label: 'EPS', f: v => money(v), src: 'fundamentals' },
+    { key: 'eps', label: 'EPS', f: v => perShare(v), src: 'fundamentals' },
     { key: 'pe', label: 'P/E', f: ratio, src: 'fundamentals' },
     { key: 'pb', label: 'P/B', f: ratio, src: 'fundamentals' },
     { key: 'ps', label: 'P/S', f: ratio, src: 'fundamentals' },
@@ -84,7 +85,7 @@ const OPTIONAL = [
     { key: 'profitGrowth', label: 'Profit growth', f: v => pct(v), tone: true, src: 'growth' },
   ] },
   { group: 'Momentum', cols: [
-    { key: 'pos52', label: '52-week range', f: (v, r) => (r.low52 == null ? '–' : `${money(r.low52)} – ${money(r.high52)}`), src: 'momentum' },
+    { key: 'pos52', label: '52-week range', f: (v, r) => (r.low52 == null ? '–' : `${perShare(r.low52)} – ${perShare(r.high52)}`), src: 'momentum' },
     { key: 'fromHigh', label: 'From 52-week high', f: v => pct(v), tone: true, src: 'momentum' },
     { key: 'perf1m', label: '1-month return', f: v => pct(v), tone: true, src: 'momentum' },
     { key: 'perf3m', label: '3-month return', f: v => pct(v), tone: true, src: 'momentum' },
@@ -136,13 +137,23 @@ const formatters = {
   [CONFIG.currency]: new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }),
   USD: new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }),
 };
+const MASK = '••••••';
+const isPrivate = () => A.ls.get('pfPrivate', false);
+
+// Per-share figures are public prices, so privacy mode leaves them showing.
+function perShare(v) {
+  if (v == null) return '–';
+  return formatters[shown].format(v);
+}
+
 function money(v, signed) {
   if (v == null) return '–';
+  if (isPrivate()) return MASK;
   const text = formatters[shown].format(v);
   return signed && v > 0 ? `+${text}` : text;
 }
 const pct = v => (v == null ? '–' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`);
-const qtyText = v => new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 3 }).format(v);
+const qtyText = v => (isPrivate() ? MASK : new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 3 }).format(v));
 const tone = v => (v == null || Math.abs(v) < 0.005 ? '' : v > 0 ? 'up' : 'down');
 const day = s => A.fmt(new Date(`${s}T00:00:00`), { dateStyle: 'medium' });
 
@@ -228,8 +239,14 @@ const MONEY_FIELDS = ['cost', 'value', 'gain', 'dayGain', 'dividends', 'dividend
 function inRupees(line, rate) {
   const out = { ...line };
   for (const key of MONEY_FIELDS) if (out[key] != null) out[key] *= rate;
+  out.flows = (line.flows ?? []).map(f => ({ ...f, amount: f.amount * rate }));
   return out;
 }
+
+export const portfolioTileText = () => {
+  if (isPrivate()) return MASK;
+  return new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, maximumFractionDigits: 0 }).format(portfolioTotal().value);
+};
 
 // Everything in rupees. Without a rate, USD brokers can't be added in.
 export function portfolioTotal() {
@@ -243,11 +260,12 @@ export function portfolioTotal() {
 
 export const portfolioNav = () => [
   { id: 'home', name: 'Overview', icon: 'pie', href: HOME },
+  { id: 'reports', name: 'Reports', icon: 'file', href: `${HOME}/reports` },
   ...accounts().map(a => ({ id: a.id, name: a.name, icon: a.kind === 'crypto' ? 'cloud' : a.kind === 'mf' ? 'chart' : 'card', href: accountPath(a.id) })),
 ];
 
 export function portfolioRouteValid(r) {
-  if (r.page === 'home' || r.page === 'add') return true;
+  if (r.page === 'home' || r.page === 'add' || r.page === 'reports') return true;
   if (!accountById(r.id)) return false;
   if (r.page === 'stock') return !!computed(accountById(r.id)).positions.get(r.symbol);
   return ['account', 'reconcile', 'trade'].includes(r.page);
@@ -408,9 +426,11 @@ function hero(title, sub, up, extra = '') {
     ${A.upButton(up)}
     <span class="hero-icon">${icon('pie')}</span>
     <div class="titles"><h1>${A.esc(title)}</h1><p>${A.esc(sub)}</p></div>
-    ${extra}${A.menuButton}
+    ${privacyButton()}${extra}${A.menuButton}
   </header>`;
 }
+
+const privacyButton = () => `<button class="icon-btn" data-act="pf-privacy" aria-pressed="${isPrivate()}" aria-label="${isPrivate() ? 'Show amounts' : 'Hide amounts'}" title="${isPrivate() ? 'Show amounts' : 'Hide amounts'}">${icon(isPrivate() ? 'eyeOff' : 'eye')}</button>`;
 
 const info = id => `<button class="pf-info" data-act="pf-info" data-id="${id}" aria-label="Data source">${icon('info')}</button>`;
 
@@ -422,6 +442,7 @@ function summaryStats(s) {
   return `<div class="stats five">
     ${stat(`Total amount${info('price')}`, money(s.value), `Invested ${money(s.cost)}${s.unpriced ? `, ${s.unpriced} unpriced left out` : ''}`)}
     ${stat(`Unrealized gain/loss${info('gain')}`, money(s.gain, true), pct(s.gainPct), tone(s.gain))}
+    ${stat(`XIRR${info('xirr')}`, pct(s.xirr), 'Annual return', tone(s.xirr))}
     ${stat('Realized gain/loss', money(s.realized, true), pct(s.realizedPct), tone(s.realized))}
     ${stat(`Day change${info('price')}`, money(s.dayGain, true), pct(s.dayPct), tone(s.dayGain))}
     ${stat(`Total dividends${info('dividends')}`, money(s.dividends), s.yieldOnCost ? `${s.yieldOnCost.toFixed(2)}% yield on cost${info('yieldOnCost')}` : '')}
@@ -545,12 +566,12 @@ function bindRestore() {
 
 function homeView(r) {
   const list = accounts();
-  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>`;
+  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a>` : ''}`;
   const body = list.length
     ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
         <div class="status" id="pf-status">${statusLine()}</div>
-        ${list.some(isUsd) ? `<div class="status">${fxRate() ? `USD brokers are converted at ${money(fxRate())} to the dollar` : 'No USD rate yet, so USD brokers are left out of these totals'}${info('fx')}</div>` : ''}
+        ${list.some(isUsd) ? `<div class="status">${fxRate() ? `USD brokers are converted at ${perShare(fxRate())} to the dollar` : 'No USD rate yet, so USD brokers are left out of these totals'}${info('fx')}</div>` : ''}
         ${backupButtons(add)}
         <div class="rows pf-accounts">${list.map(a => {
           const { summary: s, held } = computed(a);
@@ -750,7 +771,7 @@ function groupTable(account, rows) {
     const sub = col.sub?.(r);
     return `<td class="num ${col.tone ? tone(v) : ''}">${col.f(v, r)}${sub ? `<small>${sub}</small>` : ''}</td>`;
   };
-  const totals = { cost: total.cost, value: total.value, dividends: total.dividends, dayGain: total.dayGain, dayPct: total.dayPct, gain: total.gain, gainPct: total.gainPct, realized: total.realized, realizedPct: total.realizedPct };
+  const totals = { xirr: total.xirr, cost: total.cost, value: total.value, dividends: total.dividends, dayGain: total.dayGain, dayPct: total.dayPct, gain: total.gain, gainPct: total.gainPct, realized: total.realized, realizedPct: total.realizedPct };
   return `<div class="holdings-wrap"><table class="holdings">
     <thead><tr>${COLS.map(columnHeader).join('')}</tr></thead>
     <tbody>${rows.map(r => {
@@ -881,6 +902,179 @@ export function disclosureView() {
     </div></div>`;
 }
 
+/* ---------- reports ---------- */
+
+const R = { broker: 'all', year: 'all' };
+const REPORTS = { dividends: 'Dividends', gains: 'Capital gains' };
+
+// Indian financial years run April to March, named by the year they start.
+const fyStart = date => Number(date.slice(0, 4)) - (date.slice(5, 7) < '04' ? 1 : 0);
+const fyName = y => `FY${y}-${String(y + 1).slice(2)}`;
+const monthKey = date => date.slice(0, 7);
+const monthText = (key, opts) => A.fmt(new Date(`${key}-01T00:00:00`), opts);
+
+// Each broker's positions, with a rate to bring its money into what's on screen.
+function reportBrokers() {
+  const list = accounts().filter(a => R.broker === 'all' || a.id === R.broker);
+  shown = R.broker !== 'all' && list[0]?.currency === 'USD' ? 'USD' : CONFIG.currency;
+  return list.map(a => ({ account: a, c: computed(a), rate: shown === CONFIG.currency && isUsd(a) ? fxRate() ?? 0 : 1 }));
+}
+
+function reportFilters(years) {
+  const year = years.includes(Number(R.year)) ? R.year : 'all';
+  R.year = year;
+  return `<div class="pf-sort pf-filters">
+    <label for="r-broker">Broker</label>
+    <select class="select" id="r-broker"><option value="all">All brokers</option>${accounts().map(a => `<option value="${a.id}"${a.id === R.broker ? ' selected' : ''}>${A.esc(a.name)}</option>`).join('')}</select>
+    <label for="r-year">Year</label>
+    <select class="select" id="r-year"><option value="all">All years</option>${years.map(y => `<option value="${y}"${String(y) === String(year) ? ' selected' : ''}>${fyName(y)}</option>`).join('')}</select>
+    <label class="switch pf-detail"><input type="checkbox" id="r-detail"${detailed() ? ' checked' : ''}><span>Detailed report</span></label>
+  </div>`;
+}
+
+const detailed = () => A.ls.get('pfReportDetail', false);
+
+const inYear = date => R.year === 'all' || fyStart(date) === Number(R.year);
+
+// One bar a month: April to March for a year, every month since the first for All.
+function monthBars(amounts) {
+  let keys;
+  if (R.year === 'all') {
+    const known = [...amounts.keys()].sort();
+    if (!known.length) return '';
+    keys = [];
+    for (let k = known[0]; k <= known.at(-1);) {
+      keys.push(k);
+      const [y, m] = k.split('-').map(Number);
+      k = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+    }
+  } else {
+    const y = Number(R.year);
+    keys = Array.from({ length: 12 }, (_, i) => `${i < 9 ? y : y + 1}-${String((i + 3) % 12 + 1).padStart(2, '0')}`);
+  }
+  const max = Math.max(...keys.map(k => amounts.get(k) ?? 0));
+  if (!max) return '';
+  const peak = keys.find(k => amounts.get(k) === max);
+  const long = keys.length > 12;
+  return `<section class="panel">
+    <h2>Dividends by month</h2>
+    <p class="muted small chart-note">Highest: ${monthText(peak, { month: 'long', year: 'numeric' })}, ${money(max)}</p>
+    <div class="months${long ? ' long' : ''}">${keys.map(k => {
+      const v = amounts.get(k) ?? 0;
+      const text = `${monthText(k, { month: 'short', year: 'numeric' })}: ${money(v)}`;
+      const label = !long ? monthText(k, { month: 'short' }) : k.endsWith('-01') ? k.slice(0, 4) : '';
+      return `<button class="month" tabindex="-1" data-tip="${text}" aria-label="${text}"><span class="month-plot">${v ? `<span class="bar paid" style="height:${v / max * 100}%"></span>` : ''}</span><span class="month-name">${label}</span></button>`;
+    }).join('')}</div>
+  </section>`;
+}
+
+function dividendReport() {
+  const brokers = reportBrokers();
+  const all = brokers.flatMap(({ account, c, rate }) => [...c.positions.values()].flatMap(p => p.dividendEvents.map(d => ({ ...d, amount: d.amount * rate, symbol: p.symbol, account }))));
+  const years = [...new Set(all.map(d => fyStart(d.date)))].sort((a, b) => b - a);
+  const filters = reportFilters(years);
+  const rows = all.filter(d => inYear(d.date));
+  const total = rows.reduce((n, d) => n + d.amount, 0);
+  const cost = brokers.reduce((n, { c, rate }) => n + c.held.reduce((m, l) => m + l.cost * rate, 0), 0);
+  const byMonth = new Map();
+  rows.forEach(d => byMonth.set(monthKey(d.date), (byMonth.get(monthKey(d.date)) ?? 0) + d.amount));
+  const byStock = new Map();
+  for (const d of rows) {
+    const key = `${d.account.id}:${d.symbol}`;
+    const row = byStock.get(key) ?? { symbol: d.symbol, account: d.account, amount: 0, count: 0 };
+    row.amount += d.amount;
+    row.count++;
+    byStock.set(key, row);
+  }
+  const costOf = row => {
+    const { c, rate } = brokers.find(b => b.account === row.account);
+    const line = c.held.find(l => l.symbol === row.symbol);
+    return line ? line.cost * rate : 0;
+  };
+  const list = [...byStock.values()].sort((a, b) => b.amount - a.amount);
+  return `${filters}
+    <div class="stats">
+      ${stat(`Total dividends${info('dividends')}`, money(total), A.plural(rows.length, 'payment'))}
+      ${stat(`Dividend yield at cost${info('yieldOnCost')}`, cost ? `${(total / cost * 100).toFixed(2)}%` : '–', R.year === 'all' ? 'All years together' : 'For this year')}
+      ${stat('Stocks that paid', String(list.length), '')}
+      ${stat('Cost of current holdings', money(cost), 'The base for the yield')}
+    </div>
+    ${monthBars(byMonth)}
+    ${!list.length ? `<div class="empty">${icon('file')}<p>No dividends for this selection.</p></div>` : !detailed() ? '' : `<section class="panel"><h2>By stock</h2><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Stock</th><th>Broker</th><th class="num">Payments</th><th class="num">Dividends</th><th class="num">Yield at cost</th></tr></thead>
+      <tbody>${list.map(row => {
+        const base = costOf(row);
+        return `<tr><td><a class="pf-link" href="${accountPath(row.account.id)}/h/${encodeURIComponent(row.symbol)}">${A.esc(row.symbol)}</a></td><td>${A.esc(row.account.name)}</td><td class="num">${row.count}</td><td class="num">${money(row.amount)}</td><td class="num">${base ? `${(row.amount / base * 100).toFixed(2)}%` : '–'}</td></tr>`;
+      }).join('')}</tbody>
+    </table></div></section>`}
+    <p class="muted small">Before tax. Worked out from Yahoo Finance dividend history and what you held on each ex-date, so it may differ slightly from what reached your bank. Yield is on the cost of what you hold now.</p>`;
+}
+
+// Over 12 months is long term, or over 24 for shares held abroad.
+function gainType(sale, us) {
+  if (sale.intraday) return 'Intraday';
+  const limit = `${Number(sale.buyDate.slice(0, 4)) + (us ? 2 : 1)}${sale.buyDate.slice(4)}`;
+  return sale.sellDate > limit ? 'Long term' : 'Short term';
+}
+
+function gainsReport() {
+  const brokers = reportBrokers();
+  const all = brokers.flatMap(({ account, c, rate }) => [...c.positions.values()].flatMap(p => p.realized.map(s => ({
+    ...s, symbol: p.symbol, account, type: gainType(s, isUsd(account)),
+    proceeds: s.qty * s.price * rate, costBasis: s.qty * s.cost * rate, gain: s.qty * (s.price - s.cost) * rate,
+  }))));
+  const years = [...new Set(all.map(s => fyStart(s.sellDate)))].sort((a, b) => b - a);
+  const filters = reportFilters(years);
+  const rows = all.filter(s => inYear(s.sellDate)).sort((a, b) => b.sellDate.localeCompare(a.sellDate));
+  const sum = (list, key) => list.reduce((n, s) => n + s[key], 0);
+  const ofType = t => sum(rows.filter(s => s.type === t), 'gain');
+  const total = sum(rows, 'gain');
+  const costBasis = sum(rows, 'costBasis');
+  const byStock = new Map();
+  for (const s of rows) {
+    const key = `${s.account.id}:${s.symbol}`;
+    const row = byStock.get(key) ?? { symbol: s.symbol, account: s.account, proceeds: 0, 'Short term': 0, 'Long term': 0, Intraday: 0, gain: 0 };
+    row.proceeds += s.proceeds;
+    row.gain += s.gain;
+    row[s.type] += s.gain;
+    byStock.set(key, row);
+  }
+  const cellGain = v => `<td class="num ${tone(v)}">${v ? money(v, true) : '–'}</td>`;
+  return `${filters}
+    <div class="stats">
+      ${stat(`Total realized gain${info('capitalGains')}`, money(total, true), costBasis ? pct(total / costBasis * 100) : '', tone(total))}
+      ${stat('Short term', money(ofType('Short term'), true), '', tone(ofType('Short term')))}
+      ${stat('Long term', money(ofType('Long term'), true), '', tone(ofType('Long term')))}
+      ${stat('Intraday', money(ofType('Intraday'), true), '', tone(ofType('Intraday')))}
+    </div>
+    ${!rows.length ? `<div class="empty">${icon('file')}<p>No sales for this selection.</p></div>` : !detailed() ? '' : `<section class="panel"><h2>By stock</h2><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Stock</th><th>Broker</th><th class="num">Sold for</th><th class="num">Short term</th><th class="num">Long term</th><th class="num">Intraday</th><th class="num">Total</th></tr></thead>
+      <tbody>${[...byStock.values()].sort((a, b) => b.gain - a.gain).map(row => `<tr><td><a class="pf-link" href="${accountPath(row.account.id)}/h/${encodeURIComponent(row.symbol)}">${A.esc(row.symbol)}</a></td><td>${A.esc(row.account.name)}</td><td class="num">${money(row.proceeds)}</td>${cellGain(row['Short term'])}${cellGain(row['Long term'])}${cellGain(row.Intraday)}${cellGain(row.gain)}</tr>`).join('')}</tbody>
+    </table></div></section>
+    <details class="panel pf-details"><summary>Every sale (${rows.length})</summary><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Sold</th><th>Bought</th><th>Stock</th><th>Type</th><th class="num">Shares</th><th class="num">Buy price</th><th class="num">Sell price</th><th class="num">Gain</th></tr></thead>
+      <tbody>${rows.map(s => `<tr><td>${day(s.sellDate)}</td><td>${day(s.buyDate)}</td><td>${A.esc(s.symbol)}</td><td>${s.type}</td><td class="num">${qtyText(s.qty)}</td><td class="num">${perShare(s.costBasis / s.qty)}</td><td class="num">${perShare(s.proceeds / s.qty)}</td>${cellGain(s.gain)}</tr>`).join('')}</tbody>
+    </table></div></details>`}
+    <p class="muted small">Sells are matched to buys oldest first. Long term means held over 12 months, or over 24 for US shares. Excludes charges, and doesn't apply every tax rule, such as debt fund treatment, so check with your broker's tax statement before filing.</p>`;
+}
+
+function reportsView(r) {
+  const tab = REPORTS[r.tab] ? r.tab : 'dividends';
+  const body = tab === 'gains' ? gainsReport() : dividendReport();
+  A.view.innerHTML = `
+    ${hero('Reports', REPORTS[tab], HOME)}
+    <div class="seg tabs" role="group" aria-label="Report">
+      ${Object.entries(REPORTS).map(([k, label]) => `<a href="${HOME}/reports/${k}"${k === tab ? ' aria-current="page"' : ''}><span>${label}</span></a>`).join('')}
+    </div>
+    <div class="scroll"><div class="pay-page pf-page">${body}</div></div>`;
+  // A long chart opens on the latest months.
+  const bars = A.$('.months.long');
+  if (bars) bars.scrollLeft = bars.scrollWidth;
+  A.$('#r-broker').addEventListener('change', e => { R.broker = e.target.value; reportsView(r); });
+  A.$('#r-year').addEventListener('change', e => { R.year = e.target.value; reportsView(r); });
+  A.$('#r-detail').addEventListener('change', e => { A.ls.set('pfReportDetail', e.target.checked); reportsView(r); });
+}
+
 /* ---------- one stock ---------- */
 
 function eventLine(e, symbol) {
@@ -953,12 +1147,13 @@ function stockView(r) {
   const price = line.price;
   const history = [...p.events].sort((a, b) => b.date.localeCompare(a.date));
   A.view.innerHTML = `
-    <header class="topbar">${A.upButton(accountPath(account.id))}<div class="titles"><h1>${A.esc(r.symbol)}</h1><p>${A.esc(line.name || account.name)}</p></div>${A.menuButton}</header>
+    <header class="topbar">${A.upButton(accountPath(account.id))}<div class="titles"><h1>${A.esc(r.symbol)}</h1><p>${A.esc(line.name || account.name)}</p></div>${privacyButton()}${A.menuButton}</header>
     <div class="scroll"><div class="pay-page">
       <div class="stats">
         ${stat('Shares', qtyText(line.qty), `Cost per share ${money(line.avg)}`)}
         ${stat('Market value', money(line.value), `Last price ${money(price)}`)}
         ${stat('Total gain', money(line.gain, true), pct(line.gainPct), tone(line.gain))}
+        ${stat(`XIRR${info('xirr')}`, pct(line.xirr), 'Annual return', tone(line.xirr))}
         ${stat('Day gain', money(line.dayGain, true), pct(line.dayPct), tone(line.dayGain))}
         ${stat('Realized gain', money(line.realized, true), pct(line.realizedPct), tone(line.realized))}
         ${stat('Dividend income', money(line.dividends), A.plural(p.dividendEvents.length, 'payment'))}
@@ -1263,6 +1458,9 @@ export async function portfolioAction(b) {
     case 'pf-refresh': return refreshMarket(true);
     case 'pf-backup': return saveBackup();
     case 'pf-info': return showSource(id);
+    case 'pf-privacy':
+      A.ls.set('pfPrivate', !isPrivate());
+      return A.refresh();
     case 'pf-columns': return chooseColumns();
     case 'pf-note': return reviewNote(accountById(id), symbol);
     case 'pf-allot': return reconcileEntry(accountById(id), symbol, b.dataset.kind);
@@ -1303,6 +1501,7 @@ export async function portfolioAction(b) {
 export function portfolioView(r) {
   shown = (r.id && accountById(r.id)?.currency) || CONFIG.currency;
   if (r.page === 'add') addView();
+  else if (r.page === 'reports') reportsView(r);
   else if (r.page === 'account') accountView(r);
   else if (r.page === 'stock') stockView(r);
   else if (r.page === 'reconcile') reconcileView(r);
