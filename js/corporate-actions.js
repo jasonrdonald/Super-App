@@ -17,6 +17,13 @@ export const CORPORATE_ACTIONS = [
   { type: 'demerger', symbol: 'RELIANCE', to: 'JIOFIN', date: '2023-07-20', num: 1, den: 1, costShare: 0.0468, note: 'Financial services demerged' },
   { type: 'demerger', symbol: 'SIEMENS', to: 'ENRIN', date: '2025-04-07', num: 1, den: 1, costShare: 0.2382, note: 'Energy business demerged' },
   { type: 'demerger', symbol: 'TMPV', to: 'TMCV', date: '2025-10-14', num: 1, den: 1, costShare: 0.3115, note: 'Commercial vehicles demerged' },
+  { type: 'demerger', symbol: 'GE', to: 'GEV', date: '2024-04-02', num: 1, den: 4, costShare: 0.2026, note: 'GE Vernova spun off' },
+];
+
+// Yahoo lists these spin-offs as splits, but the share count didn't change.
+export const NOT_SPLITS = [
+  { symbol: 'GE', date: '2023-01-04' },
+  { symbol: 'GE', date: '2024-04-02' },
 ];
 
 // Rights issues and IPOs, from published offer terms. Brokers don't list these in

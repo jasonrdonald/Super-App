@@ -32,7 +32,7 @@ export const GROUPINGS = {
     label: 'Market cap',
     order: ['Large cap', 'Mid cap', 'Small cap', 'Micro cap'],
     rule: 'Large: ₹1,00,000 Cr or more. Mid: ₹30,000 Cr or more. Small: ₹5,000 Cr or more. Micro: below that.',
-    band: l => bands(l.marketCap, [[1e5 * CRORE, 'Large cap'], [3e4 * CRORE, 'Mid cap'], [5e3 * CRORE, 'Small cap'], [-Infinity, 'Micro cap']]),
+    band: l => bands(l.capInr ?? l.marketCap, [[1e5 * CRORE, 'Large cap'], [3e4 * CRORE, 'Mid cap'], [5e3 * CRORE, 'Small cap'], [-Infinity, 'Micro cap']]),
   },
   momentum: {
     label: 'Momentum',

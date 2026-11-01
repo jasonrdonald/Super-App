@@ -51,10 +51,11 @@ export const SOURCES = {
 
 // id, label, the sources behind it, and how it's worked out when that isn't obvious.
 export const DATA_POINTS = [
-  { id: 'price', label: 'Last price, market value, day gain', sources: ['tradingview', 'mfapi', 'coingecko'], how: 'Stocks and ETFs from TradingView, funds from MFapi.in, crypto from CoinGecko. Falls back to the holdings file\'s price.' },
+  { id: 'price', label: 'Last price, market value, day gain', sources: ['tradingview', 'mfapi', 'coingecko'], how: 'Indian and US stocks and ETFs from TradingView, funds from MFapi.in, crypto from CoinGecko. Falls back to the holdings file\'s price.' },
+  { id: 'fx', label: 'USD to INR rate', sources: ['tradingview'], how: 'The latest rate converts all USD figures on the main Portfolio page, including cost, so it shows today\'s rupee value, not the rate you bought at.' },
   { id: 'gain', label: 'Total gain, unrealized gain', sources: ['app', 'tradingview', 'mfapi', 'coingecko'], how: 'Market value less your cost.' },
   { id: 'names', label: 'Stock names and ticker matching', sources: ['tradingview'], how: 'HDFC reports give only company names, matched against the NSE and BSE lists.' },
-  { id: 'dividends', label: 'Dividend income', sources: ['yahoo', 'app'], how: 'Each dividend per share times the shares you held the day before its ex-date.' },
+  { id: 'dividends', label: 'Dividend income', sources: ['yahoo', 'app'], how: 'Each dividend per share times the shares you held the day before its ex-date. Before tax, so US dividends show more than you received after withholding.' },
   { id: 'yieldOnCost', label: 'Dividend yield on cost', sources: ['yahoo', 'app'], how: 'Dividends received in the last 12 months divided by the cost of what you hold now.' },
   { id: 'splits', label: 'Splits and bonuses', sources: ['yahoo', 'curated'], how: 'From Yahoo, with bonuses and ETF splits it misses added by hand.' },
   { id: 'mergers', label: 'Mergers and demergers', sources: ['curated'], how: 'Ratios and cost shares as published.' },

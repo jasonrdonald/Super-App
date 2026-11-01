@@ -11,7 +11,7 @@ const tvTicker = (exchange, s) => `${exchange}:${s.replace(/-/g, '_')}`;
 // App field to scanner columns, best first. Only some companies report trailing
 // figures, so most fall back to the last full year.
 const FUNDAMENTALS = {
-  sector: ['sector'], industry: ['industry'], marketCap: ['market_cap_basic'],
+  sector: ['sector'], industry: ['industry'], marketCap: ['market_cap_basic'], type: ['type'],
   divYield: ['dividends_yield_current'], eps: ['earnings_per_share_diluted_ttm'], pe: ['price_earnings_ttm'],
   pb: ['price_book_ratio'], ps: ['price_sales_ratio'], evEbitda: ['enterprise_value_ebitda_ttm'],
   roe: ['return_on_equity', 'return_on_equity_fy'], roce: ['return_on_capital_employed_fy'],
@@ -65,6 +65,30 @@ export async function stockQuotes(symbols) {
   return quotes;
 }
 
+// US tickers, found by name as each sits on one of several exchanges.
+export async function usQuotes(symbols) {
+  const res = await fetch('https://scanner.tradingview.com/america/scan', {
+    method: 'POST', signal: timed(),
+    body: JSON.stringify({ filter: [{ left: 'name', operation: 'in_range', right: symbols }], columns: SCAN_COLUMNS, range: [0, symbols.length * 2] }),
+  });
+  if (!res.ok) throw new Error(`Price service answered ${res.status}`);
+  const quotes = new Map();
+  for (const { s, d } of (await res.json()).data ?? []) {
+    if (d[0] != null) quotes.set(s.split(':')[1], { price: d[0], changePct: d[1], change: d[2], name: d[3], f: fundamentalsFrom(d) });
+  }
+  return quotes;
+}
+
+// Rupees per US dollar.
+export async function usdInr() {
+  const res = await fetch('https://scanner.tradingview.com/forex/scan', {
+    method: 'POST', signal: timed(),
+    body: JSON.stringify({ symbols: { tickers: ['FX_IDC:USDINR'] }, columns: ['close'] }),
+  });
+  if (!res.ok) throw new Error(`Rate service answered ${res.status}`);
+  return (await res.json()).data?.[0]?.d[0] ?? null;
+}
+
 let listed;
 
 // Every security on NSE, then whatever only BSE lists, for matching names to tickers.
@@ -103,9 +127,11 @@ const relays = [
 const dayOf = seconds => new Date((seconds + 19800) * 1000).toISOString().slice(0, 10);
 
 // Resolves to { splits, dividends }, or null when Yahoo doesn't know the ticker.
-export async function stockEvents(symbol, from) {
+export async function stockEvents(symbol, from, us) {
   const start = Math.floor(new Date(from).getTime() / 1000);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}.NS?period1=${start}&period2=${Math.floor(Date.now() / 1000)}&interval=1wk&events=div%2Csplit`;
+  // Yahoo writes share classes with a dash, as in BRK-B.
+  const ticker = us ? symbol.replace('.', '-') : `${symbol}.NS`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${start}&period2=${Math.floor(Date.now() / 1000)}&interval=1wk&events=div%2Csplit`;
   let lastError;
   for (const relay of relays) {
     try {

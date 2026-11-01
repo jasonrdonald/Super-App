@@ -124,6 +124,45 @@ function hdfcHoldings(items, file) {
   return { kind: 'holdings', named: true, holdings, asOf, clientId: '' };
 }
 
+/* ---------- Vested: US shares, in fractions ---------- */
+
+function headedRows(rows, heading) {
+  const head = rows.findIndex(r => r.some(c => key(c) === heading));
+  if (head < 0) return [];
+  const cols = rows[head].map(key);
+  return rows.slice(head + 1).map(r => Object.fromEntries(cols.map((c, i) => [c, r[i] ?? '']))).filter(x => x[heading]);
+}
+
+const clock24 = t => {
+  const [, h, m, s, ap] = String(t).match(/(\d+):(\d+):(\d+)\s*(AM|PM)/i) ?? [, '0', '00', '00', 'AM'];
+  const hour = (Number(h) % 12) + (/pm/i.test(ap) ? 12 : 0);
+  return `${String(hour).padStart(2, '0')}:${m}:${s}`;
+};
+
+// A trade's cash amount includes commission, and the broker's average cost
+// counts it, so the price kept here is cash per share.
+function vestedTrades(rows) {
+  const trades = [];
+  let skipped = 0;
+  for (const x of headedRows(rows, 'ticker')) {
+    const side = String(x.activity).toLowerCase();
+    const qty = Number(x.quantity), cash = Number(x['cash amount']);
+    if ((side !== 'buy' && side !== 'sell') || !(qty > 0) || !Number.isFinite(cash)) { skipped++; continue; }
+    const date = isoDate(x.date);
+    const time = `${date}T${clock24(x['time in utc'])}`;
+    trades.push({ symbol: String(x.ticker).trim(), isin: '', date, side, qty, price: cash / qty, kind: 'stock', exchange: 'US', series: '', tradeId: `${time}-${x.ticker}`, time });
+  }
+  return { trades, skipped };
+}
+
+function vestedHoldings(rows) {
+  const n = v => Number(String(v).replace(/,/g, '')) || 0;
+  return headedRows(rows, 'ticker').map(x => ({
+    symbol: String(x.ticker).trim(), isin: '', kind: 'stock', sector: '',
+    qty: n(x['total shares held']), avg: n(x['average cost']), close: n(x['current price']),
+  }));
+}
+
 // Resolves to { kind: 'tradebook', trades, skipped, clientId } or
 // { kind: 'holdings', holdings, asOf, clientId }. `named` means the symbols are
 // company names that still need turning into tickers.
@@ -136,6 +175,14 @@ export async function parseBrokerFile(file) {
   }
   const sheets = await readWorkbook(file);
   const first = Object.values(sheets)[0] ?? [];
+  if (sheets.Trades && sheets['My Account']) {
+    return { kind: 'tradebook', clientId: String(metaValue(sheets['My Account'], 'drivewealth account number')), ...vestedTrades(sheets.Trades) };
+  }
+  if (sheets.Holdings && sheets['User Details']) {
+    const [details] = headedRows(sheets['User Details'], 'period');
+    const asOf = String(details?.period ?? '').replace(/^as of\s+/i, '').replace(/\s+/g, '-');
+    return { kind: 'holdings', holdings: vestedHoldings(sheets.Holdings), asOf: hdfcDate(asOf), clientId: String(details?.['drivewealth account number'] ?? '') };
+  }
   if (first.some(r => key(r[0] ?? '') === 'scheme name')) {
     return { kind: 'tradebook', funds: true, clientId: String(metaValue(first, 'trading id')), ...hdfcFunds(first) };
   }

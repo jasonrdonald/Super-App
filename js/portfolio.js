@@ -3,7 +3,7 @@
 // sells to buys. Dates are 'YYYY-MM-DD' strings. Quantities and prices are in the
 // units current at each point of the replay, so a split rewrites open lots.
 
-import { CORPORATE_ACTIONS, PUBLIC_ISSUES } from './corporate-actions.js';
+import { CORPORATE_ACTIONS, PUBLIC_ISSUES, NOT_SPLITS } from './corporate-actions.js';
 
 const EPS = 1e-6;
 
@@ -36,10 +36,11 @@ const costOf = lots => lots.reduce((n, l) => n + l.qty * l.price, 0);
 // cost, because it is paid out in cash.
 // Each lot remembers how its shares changed: `factor` gives back the shares
 // originally bought, and `steps` says why.
-function rescale(lots, ratio, keepCost, step) {
+function rescale(lots, ratio, keepCost, step, fractional) {
   const before = qtyOf(lots);
   if (!before) return lots;
-  const target = Math.floor(before * ratio + EPS);
+  // US brokers hold fractions of a share, so nothing rounds there.
+  const target = fractional ? before * ratio : Math.floor(before * ratio + EPS);
   if (!target) return [];
   const k = target / before;
   return lots.map(l => ({
@@ -72,7 +73,7 @@ function positionOf(state, symbol) {
 
 /* ---------- replay ---------- */
 
-function applyAction(state, a) {
+function applyAction(state, a, fractional) {
   const p = positionOf(state, a.symbol);
   const held = qtyOf(p.lots);
   const ratio = a.num && a.den ? `${a.num}:${a.den}` : '';
@@ -118,11 +119,11 @@ function applyAction(state, a) {
   if (!held) return;
   if (a.type === 'split' || a.type === 'bonus') {
     const label = a.type === 'bonus' ? 'Bonus' : 'Split';
-    p.lots = rescale(p.lots, a.num / a.den, true, `${label} ${ratio} on ${a.date}${a.note ? ` (${a.note})` : ''}`);
+    p.lots = rescale(p.lots, a.num / a.den, true, `${label} ${ratio} on ${a.date}${a.note ? ` (${a.note})` : ''}`, fractional);
     log(p, { qty: qtyOf(p.lots) - held });
   } else if (a.type === 'rename' || a.type === 'merger') {
     const to = positionOf(state, a.to);
-    const moved = a.type === 'merger' ? rescale(p.lots, a.num / a.den, false, `Merger ${ratio} from ${a.symbol} into ${a.to} on ${a.date}`) : p.lots;
+    const moved = a.type === 'merger' ? rescale(p.lots, a.num / a.den, false, `Merger ${ratio} from ${a.symbol} into ${a.to} on ${a.date}`, fractional) : p.lots;
     p.lots = [];
     to.lots = [...to.lots, ...moved].sort((x, y) => x.date.localeCompare(y.date));
     log(p, { qty: -held, to: a.to });
@@ -130,7 +131,7 @@ function applyAction(state, a) {
   } else if (a.type === 'demerger') {
     const to = positionOf(state, a.to);
     const share = `${(a.costShare * 100).toFixed(2)}%`;
-    const split = rescale(p.lots.map(l => ({ ...l, price: l.price * a.costShare })), a.num / a.den, false, `Demerger ${ratio} from ${a.symbol} on ${a.date}, took ${share} of its cost`);
+    const split = rescale(p.lots.map(l => ({ ...l, price: l.price * a.costShare })), a.num / a.den, false, `Demerger ${ratio} from ${a.symbol} on ${a.date}, took ${share} of its cost`, fractional);
     p.lots.forEach(l => {
       l.price *= 1 - a.costShare;
       l.steps = [...(l.steps ?? []), `Demerger of ${a.to} on ${a.date}, ${share} of cost moved to it`];
@@ -190,7 +191,7 @@ function creditDividends(state, date, divs, actions) {
 }
 
 // `dividends` is a list of { symbol, date, amount }.
-export function replay(trades, actions, dividends = []) {
+export function replay(trades, actions, dividends = [], fractional = false) {
   const group = (list, key) => list.reduce((m, x) => m.set(key(x), [...(m.get(key(x)) ?? []), x]), new Map());
   const tradeDays = group(trades, t => t.date);
   const actionDays = group(actions, a => a.date);
@@ -201,7 +202,7 @@ export function replay(trades, actions, dividends = []) {
     // On an ex-date the dividend goes to whoever held the day before, and a
     // split applies before that day's trades.
     creditDividends(state, date, divDays.get(date) ?? [], actions);
-    for (const a of actionDays.get(date) ?? []) applyAction(state, a);
+    for (const a of actionDays.get(date) ?? []) applyAction(state, a, fractional);
     const bySymbol = group(tradeDays.get(date) ?? [], t => t.symbol);
     for (const [symbol, list] of bySymbol) {
       settleDay(positionOf(state, symbol), date, [...list].sort((a, b) => (a.time ?? '').localeCompare(b.time ?? '')));
@@ -217,7 +218,8 @@ export function replay(trades, actions, dividends = []) {
 function allActions(market) {
   const yahoo = market.flatMap(m => (m.splits ?? []).map(s => ({ type: 'split', symbol: m.symbol, date: s.date, num: s.num, den: s.den, note: 'From Yahoo Finance' })));
   const same = (a, b) => a.symbol === b.symbol && a.date === b.date && a.num === b.num && a.den === b.den;
-  return [...yahoo.filter(y => !CORPORATE_ACTIONS.some(c => same(c, y))), ...CORPORATE_ACTIONS];
+  const real = yahoo.filter(y => !NOT_SPLITS.some(n => n.symbol === y.symbol && n.date === y.date));
+  return [...real.filter(y => !CORPORATE_ACTIONS.some(c => same(c, y))), ...CORPORATE_ACTIONS];
 }
 
 const isWhole = n => Math.abs(n - Math.round(n)) < 1e-3;
@@ -255,7 +257,7 @@ function issuesFor(named, holdings, actions, first, own) {
   return out;
 }
 
-export function buildPositions({ trades, holdings = [], market = [], own = [] }) {
+export function buildPositions({ trades, holdings = [], market = [], own = [], fractional = false }) {
   const map = symbolMap(trades, holdings);
   const named = trades.map(t => {
     const symbol = map.get(t.symbol) ?? baseSymbol(t.symbol);
@@ -264,8 +266,8 @@ export function buildPositions({ trades, holdings = [], market = [], own = [] })
   const dividends = market.flatMap(m => (m.dividends ?? []).map(d => ({ symbol: m.symbol, date: d.date, amount: d.amount })));
   // The account's own adjustments run last on a date, once everything else has landed.
   const actions = [...allActions(market), ...own];
-  const issues = issuesFor(named, holdings, actions, replay(named, actions), own);
-  return replay(named, [...issues, ...actions], dividends);
+  const issues = issuesFor(named, holdings, actions, replay(named, actions, [], fractional), own);
+  return replay(named, [...issues, ...actions], dividends, fractional);
 }
 
 // One line of the holdings table, with `quote` as { price, change, changePct }.
@@ -335,6 +337,7 @@ export function cleanAccount(x) {
   return {
     id: x.id, name: text(x.name, 80) || 'Broker account', broker: text(x.broker, 80) || 'Other',
     kind: ['stock', 'mf', 'crypto'].includes(x.kind) ? x.kind : 'stock', clientId: text(x.clientId, 40),
+    currency: x.currency === 'USD' ? 'USD' : 'INR',
     createdAt: finite(x.createdAt, t), updatedAt: finite(x.updatedAt, t),
   };
 }

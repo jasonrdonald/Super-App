@@ -3,13 +3,15 @@ import * as db from './db.js';
 import { CONFIG } from './config.js';
 import { ISSUE_LABEL, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
-import { stockQuotes, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
+import { stockQuotes, usQuotes, usdInr, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS } from './disclosures.js';
 import { GROUPINGS, bandOf, orderBands } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
-const BROKERS = ['Zerodha', 'HDFC Securities', 'Other'];
+const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Other'];
+const FX_KEY = 'FX:USDINR';
+const US_PREFIX = 'US:';
 const isTicker = s => /^[A-Z0-9&_-]+$/.test(s);
 const HOME = '#/s/portfolio';
 const QUOTE_MAX_AGE = 6 * 60 * 60 * 1000;
@@ -33,7 +35,11 @@ const COLUMNS = [
   { key: 'realized', label: 'Realized gain', f: v => money(v, true), tone: true },
 ];
 
-const crores = v => (v == null ? '–' : `₹${new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 0 }).format(v / 1e7)} Cr`);
+const crores = v => {
+  if (v == null) return '–';
+  if (shown === 'USD') return `$${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(v / 1e9)}B`;
+  return `₹${new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 0 }).format(v / 1e7)} Cr`;
+};
 const ratio = v => (v == null ? '–' : v.toFixed(2));
 const plainPct = v => (v == null ? '–' : `${v.toFixed(2)}%`);
 
@@ -124,10 +130,15 @@ const accounts = () => [...A.S.brokerAccounts].sort((a, b) => a.createdAt - b.cr
 const holdingsOf = id => A.S.brokerHoldings.find(h => h.id === id);
 const accountPath = id => `${HOME}/a/${id}`;
 
-const formatter = new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// The currency on screen: a broker's own on its pages, rupees on the main page.
+let shown = CONFIG.currency;
+const formatters = {
+  [CONFIG.currency]: new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  USD: new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+};
 function money(v, signed) {
   if (v == null) return '–';
-  const text = formatter.format(v);
+  const text = formatters[shown].format(v);
   return signed && v > 0 ? `+${text}` : text;
 }
 const pct = v => (v == null ? '–' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`);
@@ -137,8 +148,18 @@ const day = s => A.fmt(new Date(`${s}T00:00:00`), { dateStyle: 'medium' });
 
 /* ---------- derived data ---------- */
 
-function quoteFor(symbol, rows) {
-  const m = A.S.market.find(x => x.symbol === symbol);
+const isUsd = account => account.currency === 'USD';
+const fxRate = () => A.S.market.find(m => m.symbol === FX_KEY)?.price ?? null;
+
+// Market data for an account's own market, under its plain symbols. US records
+// are kept apart, as a ticker can mean different companies in each country.
+function marketFor(account) {
+  if (!isUsd(account)) return A.S.market.filter(m => !m.symbol.includes(':'));
+  return A.S.market.filter(m => m.symbol.startsWith(US_PREFIX)).map(m => ({ ...m, symbol: m.symbol.slice(US_PREFIX.length) }));
+}
+
+function quoteFor(symbol, rows, market) {
+  const m = market.find(x => x.symbol === symbol);
   if (m?.price != null) return m;
   const file = rows.find(r => baseSymbol(r.symbol) === symbol);
   return file?.close ? { price: file.close, change: null } : null;
@@ -162,20 +183,25 @@ function computed(account) {
   const rows = file?.rows ?? [];
   const trades = A.S.trades.filter(t => t.accountId === account.id);
   const groupOf = grouper(account, rows, trades);
+  const market = marketFor(account);
   const positions = buildPositions({
     trades,
     holdings: rows,
-    market: A.S.market,
+    market,
     own: A.S.portfolioActions.filter(a => a.accountId === account.id),
+    fractional: isUsd(account),
   });
   const lines = [...positions.values()]
     .filter(p => p.lots.length || p.realized.length || p.dividends || p.events.some(e => e.kind === 'allot'))
     .map(p => {
-      const group = groupOf(p.symbol);
-      const known = A.S.market.find(m => m.symbol === p.symbol)?.name;
-      const line = { ...summarizePosition(p, quoteFor(p.symbol, rows)), group, name: known ?? (group === 'Mutual funds' ? p.symbol : '') };
-      const f = A.S.market.find(m => m.symbol === p.symbol)?.f ?? {};
+      const record = market.find(m => m.symbol === p.symbol);
+      const f = record?.f ?? {};
+      const raw = groupOf(p.symbol);
+      // US tickers carry no ISIN, so the scanner says which are funds.
+      const group = raw === 'Stocks' && f.type === 'fund' ? 'ETFs' : raw;
+      const line = { ...summarizePosition(p, quoteFor(p.symbol, rows, market)), group, name: record?.name ?? (group === 'Mutual funds' ? p.symbol : '') };
       const fileRow = rows.find(r => baseSymbol(r.symbol) === p.symbol);
+      if (isUsd(account) && f.marketCap != null) line.capInr = f.marketCap * (fxRate() ?? 1);
       Object.assign(line, f, { sector: f.sector ?? (fileRow?.sector || undefined) });
       // The scanner reports a 0% payout for many companies that do pay dividends.
       if (!line.payout && line.divYield) line.payout = null;
@@ -197,8 +223,22 @@ function computed(account) {
   return result;
 }
 
+const MONEY_FIELDS = ['cost', 'value', 'gain', 'dayGain', 'dividends', 'dividends12m', 'realized', 'soldCost'];
+
+function inRupees(line, rate) {
+  const out = { ...line };
+  for (const key of MONEY_FIELDS) if (out[key] != null) out[key] *= rate;
+  return out;
+}
+
+// Everything in rupees. Without a rate, USD brokers can't be added in.
 export function portfolioTotal() {
-  return summarizeAll(accounts().flatMap(a => computed(a).lines));
+  const rate = fxRate();
+  return summarizeAll(accounts().flatMap(a => {
+    const { lines } = computed(a);
+    if (!isUsd(a)) return lines;
+    return rate ? lines.map(l => inRupees(l, rate)) : [];
+  }));
 }
 
 export const portfolioNav = () => [
@@ -241,8 +281,12 @@ function redraw() {
 }
 
 async function refreshQuotes() {
-  const stock = new Set(), funds = new Map(), coins = new Set();
+  const stock = new Set(), funds = new Map(), coins = new Set(), us = new Set();
   for (const a of accounts()) {
+    if (isUsd(a)) {
+      computed(a).lines.forEach(l => { us.add(l.symbol); });
+      continue;
+    }
     const rows = holdingsOf(a.id)?.rows;
     for (const line of computed(a).lines) {
       const open = line.qty > EPS;
@@ -258,6 +302,11 @@ async function refreshQuotes() {
   const changed = [];
   const apply = (symbol, q) => changed.push(saveMarket(symbol, { ...q, quotedAt: t }));
   if (stock.size) (await stockQuotes([...stock])).forEach((q, s) => apply(s, q));
+  if (us.size) {
+    (await usQuotes([...us])).forEach((q, s) => apply(US_PREFIX + s, q));
+    const rate = await usdInr();
+    if (rate) apply(FX_KEY, { price: rate });
+  }
   if (coins.size) (await cryptoQuotes([...coins])).forEach((q, s) => apply(s, q));
   const fileRow = name => A.S.brokerHoldings.flatMap(h => h.rows).find(x => baseSymbol(x.symbol) === name);
   for (const name of funds.keys()) {
@@ -287,12 +336,13 @@ function eventSymbols() {
     if (a.kind !== 'stock') continue;
     const rows = holdingsOf(a.id)?.rows ?? [];
     const c = computed(a);
+    const prefix = isUsd(a) ? US_PREFIX : '';
     const funds = new Set(rows.filter(r => r.kind === 'mf').map(r => baseSymbol(r.symbol)));
-    c.held.forEach(l => { if (!funds.has(l.symbol)) held.add(l.symbol); });
+    c.held.forEach(l => { if (!funds.has(l.symbol)) held.add(prefix + l.symbol); });
     for (const p of c.positions.values()) {
-      if (!p.events.length || funds.has(p.symbol) || p.symbol.endsWith('-RE') || !isTicker(p.symbol)) continue;
+      if (!p.events.length || funds.has(p.symbol) || p.symbol.endsWith('-RE') || !isTicker(p.symbol.replace('.', ''))) continue;
       const first = p.events.reduce((d, e) => (e.date < d ? e.date : d), '9999');
-      if (first < (all.get(p.symbol) ?? '9999')) all.set(p.symbol, first);
+      if (first < (all.get(prefix + p.symbol) ?? '9999')) all.set(prefix + p.symbol, first);
     }
   }
   const due = [...all.keys()].filter(s => {
@@ -314,7 +364,8 @@ async function refreshEvents() {
     const started = Date.now();
     try {
       // History starts well before the first trade, so nothing near it is missed.
-      const events = await stockEvents(symbol, `${Number(from.slice(0, 4)) - 1}-01-01`);
+      const us = symbol.startsWith(US_PREFIX);
+      const events = await stockEvents(us ? symbol.slice(US_PREFIX.length) : symbol, `${Number(from.slice(0, 4)) - 1}-01-01`, us);
       await db.put('market', saveMarket(symbol, { ...(events ?? { splits: [], dividends: [] }), eventsAt: Date.now() }));
     } catch {
       job.failed++;
@@ -499,14 +550,19 @@ function homeView(r) {
     ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
         <div class="status" id="pf-status">${statusLine()}</div>
+        ${list.some(isUsd) ? `<div class="status">${fxRate() ? `USD brokers are converted at ${money(fxRate())} to the dollar` : 'No USD rate yet, so USD brokers are left out of these totals'}${info('fx')}</div>` : ''}
         ${backupButtons(add)}
         <div class="rows pf-accounts">${list.map(a => {
           const { summary: s, held } = computed(a);
-          return `<a class="sub pf-account" href="${accountPath(a.id)}">
+          const rupees = isUsd(a) && fxRate() ? money(s.value * fxRate()) : '';
+          shown = a.currency ?? CONFIG.currency;
+          const card = `<a class="sub pf-account" href="${accountPath(a.id)}">
             <span class="sub-main"><span class="sub-text"><span class="card-title">${A.esc(a.name)}</span>
-            <span class="card-meta">${A.esc(a.broker)} · ${KINDS[a.kind]} · ${A.plural(held.length, 'holding')}</span></span></span>
+            <span class="card-meta">${A.esc(a.broker)} · ${KINDS[a.kind]} · ${A.plural(held.length, 'holding')}${rupees ? ` · ${rupees}` : ''}</span></span></span>
             <span class="pay-side"><span class="pay-amount">${money(s.value)}</span><span class="pf-delta ${tone(s.gain)}">${money(s.gain, true)} (${pct(s.gainPct)})</span></span>
           </a>`;
+          shown = CONFIG.currency;
+          return card;
         }).join('')}</div>
       </div>`
     : `<div class="empty">${icon('pie')}<p>Add a broker account for your stocks, mutual funds or crypto, then load its tradebooks.</p><div class="pf-start">${backupButtons(add)}</div></div>`;
@@ -524,6 +580,7 @@ function addView() {
       <label class="f wide"><span>Account name</span><input name="name" required maxlength="80" placeholder="e.g. Zerodha" autocomplete="off"></label>
       <label class="f"><span>Broker</span><select name="broker">${BROKERS.map(b => `<option>${b}</option>`).join('')}</select></label>
       <label class="f"><span>Account type</span><select name="kind">${Object.entries(KINDS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
+      <label class="f"><span>Currency</span><select name="currency"><option value="INR">INR</option><option value="USD">USD</option></select></label>
       <label class="f wide"><span>Load tradebooks and holdings</span><input name="files" type="file" multiple accept=".xlsx,.csv"></label>
       <p class="muted small wide">Pick every yearly tradebook, plus the holdings file to reconcile against. You can load more later.</p>
       <div class="f-actions wide"><button class="btn primary" type="submit">Add account</button><a class="btn ghost" href="${HOME}">Cancel</a></div>
@@ -531,6 +588,7 @@ function addView() {
     </form></div>`;
   bindRestore();
   const form = A.$('#pf-form');
+  form.elements.broker.addEventListener('change', e => { form.elements.currency.value = e.target.value === 'Vested' ? 'USD' : 'INR'; });
   form.addEventListener('submit', async e => {
     e.preventDefault();
     if (!form.reportValidity()) return;
@@ -538,7 +596,7 @@ function addView() {
     const name = d.get('name').trim();
     if (!name) return A.toast('Give the account a name.');
     const t = Date.now();
-    const account = { id: A.uid(), name, broker: d.get('broker'), kind: d.get('kind'), clientId: '', createdAt: t, updatedAt: t };
+    const account = { id: A.uid(), name, broker: d.get('broker'), kind: d.get('kind'), currency: d.get('currency'), clientId: '', createdAt: t, updatedAt: t };
     A.S.brokerAccounts.push(account);
     await A.persist('brokerAccounts', account);
     invalidate();
@@ -1243,6 +1301,7 @@ export async function portfolioAction(b) {
 }
 
 export function portfolioView(r) {
+  shown = (r.id && accountById(r.id)?.currency) || CONFIG.currency;
   if (r.page === 'add') addView();
   else if (r.page === 'account') accountView(r);
   else if (r.page === 'stock') stockView(r);
