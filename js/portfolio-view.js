@@ -9,7 +9,7 @@ import { SOURCES, DATA_POINTS } from './disclosures.js';
 import { GROUPINGS, bandOf, orderBands } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
-const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Other'];
+const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Nippon MF', 'Aionion Capital', 'Other'];
 const FX_KEY = 'FX:USDINR';
 const US_PREFIX = 'US:';
 const isTicker = s => /^[A-Z0-9&_-]+$/.test(s);
@@ -336,10 +336,11 @@ async function refreshQuotes() {
       if (q) apply(name, { ...q, schemeCode: code });
       continue;
     }
-    // Fund names vary, so a NAV far from the broker's price is the wrong plan.
-    const q = await fundQuote(name).catch(() => null);
-    const close = fileRow(name)?.close;
-    if (q && (!close || Math.abs(q.price - close) / close < 0.2)) apply(name, q);
+    // Fund names vary, so a NAV far from the last known price is the wrong plan.
+    const lastTrade = A.S.trades.filter(t => t.symbol === name).reduce((a, t) => (!a || t.date > a.date ? t : a), null);
+    const near = fileRow(name)?.close || lastTrade?.price;
+    const q = await fundQuote(name, near).catch(() => null);
+    if (q && (!near || Math.abs(q.price - near) / near < 0.2)) apply(name, q);
   }
   await db.putMany('market', changed);
   A.ls.set('pfQuotedAt', t);
@@ -602,14 +603,17 @@ function addView() {
       <label class="f"><span>Broker</span><select name="broker">${BROKERS.map(b => `<option>${b}</option>`).join('')}</select></label>
       <label class="f"><span>Account type</span><select name="kind">${Object.entries(KINDS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
       <label class="f"><span>Currency</span><select name="currency"><option value="INR">INR</option><option value="USD">USD</option></select></label>
-      <label class="f wide"><span>Load tradebooks and holdings</span><input name="files" type="file" multiple accept=".xlsx,.csv"></label>
+      <label class="f wide"><span>Load tradebooks and holdings</span><input name="files" type="file" multiple accept=".xlsx,.xls,.csv"></label>
       <p class="muted small wide">Pick every yearly tradebook, plus the holdings file to reconcile against. You can load more later.</p>
       <div class="f-actions wide"><button class="btn primary" type="submit">Add account</button><a class="btn ghost" href="${HOME}">Cancel</a></div>
       <div class="wide pf-or"><p class="muted small">Or import one or more brokers from a backup instead:</p>${backupButtons()}</div>
     </form></div>`;
   bindRestore();
   const form = A.$('#pf-form');
-  form.elements.broker.addEventListener('change', e => { form.elements.currency.value = e.target.value === 'Vested' ? 'USD' : 'INR'; });
+  form.elements.broker.addEventListener('change', e => {
+    form.elements.currency.value = e.target.value === 'Vested' ? 'USD' : 'INR';
+    if (e.target.value === 'Nippon MF') form.elements.kind.value = 'mf';
+  });
   form.addEventListener('submit', async e => {
     e.preventDefault();
     if (!form.reportValidity()) return;
@@ -815,7 +819,7 @@ function accountView(r) {
         </div>
         ${reconChip(account, c)}
         <button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>
-        <label class="btn sm">${icon('upload')}<span>Load files</span><input id="pf-files" type="file" multiple accept=".xlsx,.csv" hidden></label>
+        <label class="btn sm">${icon('upload')}<span>Load files</span><input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden></label>
       </div>
       <label class="search flush">${icon('search')}<input type="search" id="pf-q" placeholder="Search holdings" value="${A.esc(V.q)}" autocomplete="off"></label>
       <div class="pf-sort">

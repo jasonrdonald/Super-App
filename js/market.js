@@ -167,18 +167,25 @@ async function searchFunds(query) {
 
 // Holdings files name a fund without its option, so this looks for the growth
 // plan whose name shares the most words. Fund names vary between sources, so a
-// search that finds nothing is retried on just the first two words.
-export async function fundQuote(name) {
+// search that finds nothing is retried on just the first two words. Plans of one
+// fund can look alike, so when a recent price is known, `near` picks between them.
+export async function fundQuote(name, near) {
   const plain = name.replace(/\s+-\s+.*$/, '');
   let found = await searchFunds(plain);
   if (!found.length) found = await searchFunds(words(plain).slice(0, 2).join(' '));
   const direct = /direct/i.test(name);
   const wanted = new Set(words(name));
   const score = f => words(f.schemeName).filter(w => wanted.has(w)).length;
-  const fund = found
+  const ranked = found
     .filter(f => /growth/i.test(f.schemeName) && /direct/i.test(f.schemeName) === direct)
-    .sort((a, b) => score(b) - score(a))[0];
-  return fund ? fundNav(fund.schemeCode) : null;
+    .sort((a, b) => score(b) - score(a));
+  const quotes = [];
+  for (const fund of ranked.slice(0, near ? 4 : 1)) {
+    const q = await fundNav(fund.schemeCode).catch(() => null);
+    if (q) quotes.push({ ...q, schemeCode: fund.schemeCode });
+  }
+  if (!near) return quotes[0] ?? null;
+  return quotes.sort((a, b) => Math.abs(a.price - near) - Math.abs(b.price - near))[0] ?? null;
 }
 
 let codes;

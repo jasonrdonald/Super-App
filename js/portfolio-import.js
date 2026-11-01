@@ -1,7 +1,7 @@
 // Turns broker files into trades and holdings. Columns are found by their
 // heading, so this reads Zerodha's .xlsx tradebooks and its .csv ones alike.
 
-import { readWorkbook, parseCsv } from './xlsx.js';
+import { readWorkbook, readLegacyWorkbook, parseCsv } from './xlsx.js';
 
 const key = s => String(s).trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -163,10 +163,71 @@ function vestedHoldings(rows) {
   }));
 }
 
+/* ---------- Nippon India Mutual Fund: an account statement ---------- */
+
+// Only the fund, folio and each transaction are kept. The statement also carries
+// bank details, which the app has no use for.
+function nipponTrades(rows) {
+  const trades = [];
+  let skipped = 0, folio = '';
+  for (const x of headedRows(rows, 'acno')) {
+    const units = Math.abs(Number(x.units)), amount = Math.abs(Number(x.amount));
+    if (!(units > 0) || !(amount > 0)) { skipped++; continue; }
+    const [d, m, y] = String(x.trdate).split('/');
+    const date = `${y}-${m}-${d}`;
+    const what = String(x.trdesc).trim();
+    folio ||= String(x.acno);
+    trades.push({
+      symbol: String(x.funddesc).trim(), isin: '', date, side: /redem|switch out|withdraw/i.test(what) ? 'sell' : 'buy',
+      qty: units, price: amount / units, kind: 'mf', exchange: '', series: '', tradeId: `${x.code}-${date}-${what}`, time: `${date}T12:00:00`,
+    });
+  }
+  return { trades, skipped, clientId: folio };
+}
+
+/* ---------- Aionion Capital ---------- */
+
+// Net value includes charges, and the broker's average cost counts them, so the
+// price kept is net value per share. Rows carry no trade number, so a repeat of
+// an identical fill is told apart by its place among them.
+function aionionTrades(rows) {
+  const trades = [];
+  const seen = new Map();
+  let skipped = 0;
+  for (const x of headedRows(rows, 'symbol')) {
+    const side = String(x.type).toLowerCase();
+    if (side !== 'buy' && side !== 'sell') continue;
+    const qty = Number(x.quantity), net = Number(x['net value']);
+    if (!(qty > 0) || !Number.isFinite(net)) { skipped++; continue; }
+    const [d, m, y] = String(x.date).split('/');
+    const date = `${y}-${m}-${d}`;
+    const fill = `${date}-${x.symbol}-${side}-${qty}-${x.price}`;
+    const repeat = seen.get(fill) ?? 0;
+    seen.set(fill, repeat + 1);
+    trades.push({
+      symbol: String(x.symbol).trim(), isin: String(x.isin ?? '').trim(), date, side, qty, price: net / qty, kind: 'stock',
+      exchange: '', series: '', tradeId: `${fill}-${repeat}`, time: `${date}T12:00:00`,
+    });
+  }
+  return { trades, skipped };
+}
+
+function aionionHoldings(rows) {
+  return headedRows(rows, 'symbol').filter(x => /^IN[EF]/.test(String(x.isin))).map(x => ({
+    symbol: String(x.symbol).trim(), isin: String(x.isin).trim(), kind: 'stock', sector: '',
+    qty: Number(x['units qty']) || 0, avg: Number(x['avg price']) || 0, close: Number(x['market price']) || 0,
+  }));
+}
+
 // Resolves to { kind: 'tradebook', trades, skipped, clientId } or
 // { kind: 'holdings', holdings, asOf, clientId }. `named` means the symbols are
 // company names that still need turning into tickers.
 export async function parseBrokerFile(file) {
+  if (/\.xls$/i.test(file.name)) {
+    const [rows] = Object.values(readLegacyWorkbook(await file.arrayBuffer()));
+    if (!rows?.some(r => r?.some(c => key(c) === 'trdesc'))) throw new Error(`${file.name} is not an account statement.`);
+    return { kind: 'tradebook', ...nipponTrades(rows) };
+  }
   if (/\.csv$/i.test(file.name)) {
     const t = table(parseCsv(await file.text()));
     if (t?.items.length && 'stock val' in t.items[0]) return hdfcHoldings(t.items, file);
@@ -175,6 +236,13 @@ export async function parseBrokerFile(file) {
   }
   const sheets = await readWorkbook(file);
   const first = Object.values(sheets)[0] ?? [];
+  const heading = String(textOf(first, /EQUITY (TRADES|PORTFOLIO) STATEMENT/));
+  if (heading) {
+    const clientId = String(metaValue(first, 'client id'));
+    if (/TRADES/.test(heading)) return { kind: 'tradebook', clientId, ...aionionTrades(first) };
+    const asOf = String(textOf(first, /AS ON:/)).match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    return { kind: 'holdings', holdings: aionionHoldings(first), asOf: asOf ? `${asOf[3]}-${asOf[2]}-${asOf[1]}` : '', clientId };
+  }
   if (sheets.Trades && sheets['My Account']) {
     return { kind: 'tradebook', clientId: String(metaValue(sheets['My Account'], 'drivewealth account number')), ...vestedTrades(sheets.Trades) };
   }
