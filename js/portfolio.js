@@ -279,7 +279,10 @@ export function summarizePosition(p, quote) {
   const gain = value == null ? null : value - cost;
   const prev = price == null || quote.change == null ? null : price - quote.change;
   const dayGain = prev == null ? null : qty * quote.change;
+  const yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
+  const dividends12m = p.dividendEvents.filter(d => d.date >= yearAgo).reduce((n, d) => n + d.amount, 0);
   return {
+    dividends12m, yieldOnCost: cost > 0 ? dividends12m / cost * 100 : null,
     symbol: p.symbol, qty, avg: qty > EPS ? cost / qty : 0, price, cost, value,
     dividends: p.dividends,
     dayGain,
@@ -302,6 +305,8 @@ export function summarizeAll(rows) {
   const prevValue = value - dayGain;
   const soldCost = sum('soldCost');
   return {
+    // Dividends on what's sold are in here too, so this runs a little high after a big sale.
+    yieldOnCost: sum('cost') ? sum('dividends12m') / sum('cost') * 100 : null,
     realizedPct: soldCost ? sum('realized') / soldCost * 100 : null,
     // Invested covers only what has a price, so it compares with the total shown.
     value, cost: pricedCost, gain,
@@ -377,6 +382,9 @@ export function cleanMarket(x) {
     dividends: list(x.dividends).filter(d => isDate(d?.date) && Number.isFinite(d.amount)).map(d => ({ date: d.date, amount: d.amount })),
   };
   if (x.name) out.name = text(x.name, 120);
+  if (x.f && typeof x.f === 'object') {
+    out.f = Object.fromEntries(Object.entries(x.f).filter(([, v]) => Number.isFinite(v) || typeof v === 'string').map(([k, v]) => [text(k, 40), typeof v === 'string' ? text(v, 80) : v]));
+  }
   if (Number.isFinite(x.schemeCode)) out.schemeCode = x.schemeCode;
   if (Number.isFinite(x.eventsAt)) out.eventsAt = x.eventsAt;
   if (Number.isFinite(x.price)) Object.assign(out, { price: x.price, change: Number.isFinite(x.change) ? x.change : null, changePct: Number.isFinite(x.changePct) ? x.changePct : null, quotedAt: finite(x.quotedAt) });

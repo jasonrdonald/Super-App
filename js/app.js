@@ -7,7 +7,7 @@ import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } 
 import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
 import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote as cleanPortfolioNote } from './portfolio.js';
-import { initPortfolio, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTotal, portfolioChanged } from './portfolio-view.js';
+import { initPortfolio, disclosureView, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTotal, portfolioChanged } from './portfolio-view.js';
 
 const TRASH_DAYS = 30;
 const DAY = 24 * 60 * 60 * 1000;
@@ -365,6 +365,7 @@ function parseRoute(hash) {
   if (p[0] === 'note' && p[1]) return { name: 'note', id: p[1] };
   if (p[0] === 'trash') return { name: 'trash' };
   if (p[0] === 'settings') return { name: 'settings' };
+  if (p[0] === 'disclosure') return { name: 'disclosure' };
   return null;
 }
 
@@ -439,6 +440,7 @@ function renderView() {
   else if (r.name === 'payments') paymentsView(r);
   else if (r.name === 'portfolio') portfolioView(r);
   else if (r.name === 'settings') settingsView();
+  else if (r.name === 'disclosure') disclosureView();
   else listView(r);
 }
 
@@ -523,6 +525,7 @@ function renderDrawer() {
     </div>
     <div class="drawer-foot">
       ${row(r.name === 'trash', `<a class="label" href="#/trash">${icon('trash')}<span>Trash</span></a><span class="count">${trashCount || ''}</span>`)}
+      ${row(r.name === 'disclosure', `<a class="label" href="#/disclosure">${icon('info')}<span>Data disclosure</span></a>`)}
       ${row(r.name === 'settings', `<a class="label" href="#/settings">${icon('settings')}<span>Settings &amp; backup</span></a>`)}
     </div>`;
 }

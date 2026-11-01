@@ -5,6 +5,8 @@ import { ISSUE_LABEL, baseSymbol, buildPositions, summarizePosition, summarizeAl
 import { parseBrokerFile } from './portfolio-import.js';
 import { stockQuotes, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
 import { tickerFor, companyPart } from './tickers.js';
+import { SOURCES, DATA_POINTS } from './disclosures.js';
+import { GROUPINGS, bandOf, orderBands } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
 const BROKERS = ['Zerodha', 'HDFC Securities', 'Other'];
@@ -19,17 +21,84 @@ const COLUMNS = [
   { key: 'name', label: 'Stock name', text: true },
   { key: 'qty', label: 'Shares', f: v => qtyText(v) },
   { key: 'avg', label: 'Cost per share', f: v => money(v) },
-  { key: 'price', label: 'Last price', f: v => money(v) },
+  { key: 'price', label: 'Last price', f: v => money(v), src: 'price' },
   { key: 'cost', label: 'Total cost', f: v => money(v) },
-  { key: 'value', label: 'Market value', f: v => money(v) },
-  { key: 'dividends', label: 'Total div income', f: v => money(v) },
-  { key: 'dayPct', label: 'Day gain %', f: v => pct(v), tone: true },
-  { key: 'dayGain', label: 'Day gain', f: v => money(v, true), tone: true },
-  { key: 'gainPct', label: 'Total gain %', f: v => pct(v), tone: true },
-  { key: 'gain', label: 'Total gain', f: v => money(v, true), tone: true },
+  { key: 'value', label: 'Market value', f: v => money(v), src: 'price' },
+  { key: 'dividends', label: 'Total div income', f: v => money(v), src: 'dividends', sub: r => yieldLine(r.yieldOnCost) },
+  { key: 'dayPct', label: 'Day gain %', f: v => pct(v), tone: true, src: 'price' },
+  { key: 'dayGain', label: 'Day gain', f: v => money(v, true), tone: true, src: 'price' },
+  { key: 'gainPct', label: 'Total gain %', f: v => pct(v), tone: true, src: 'gain' },
+  { key: 'gain', label: 'Total gain', f: v => money(v, true), tone: true, src: 'gain' },
   { key: 'realizedPct', label: 'Realized gain %', f: v => pct(v), tone: true },
   { key: 'realized', label: 'Realized gain', f: v => money(v, true), tone: true },
 ];
+
+const crores = v => (v == null ? '–' : `₹${new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 0 }).format(v / 1e7)} Cr`);
+const ratio = v => (v == null ? '–' : v.toFixed(2));
+const plainPct = v => (v == null ? '–' : `${v.toFixed(2)}%`);
+
+// Added from the column chooser, in the groups it shows them.
+const OPTIONAL = [
+  { group: 'Size and sector', cols: [
+    { key: 'sector', label: 'Sector', text: true, src: 'sector' },
+    { key: 'industry', label: 'Industry', text: true, src: 'sector' },
+    { key: 'marketCap', label: 'Market cap', f: crores, src: 'sector' },
+  ] },
+  { group: 'Dividends', cols: [
+    { key: 'divYield', label: 'Dividend yield', f: plainPct, src: 'fundamentals' },
+    { key: 'yieldOnCost', label: 'Yield on cost', f: plainPct, src: 'yieldOnCost' },
+    { key: 'payout', label: 'Payout ratio', f: plainPct, src: 'quality' },
+  ] },
+  { group: 'Valuation', cols: [
+    { key: 'eps', label: 'EPS', f: v => money(v), src: 'fundamentals' },
+    { key: 'pe', label: 'P/E', f: ratio, src: 'fundamentals' },
+    { key: 'pb', label: 'P/B', f: ratio, src: 'fundamentals' },
+    { key: 'ps', label: 'P/S', f: ratio, src: 'fundamentals' },
+    { key: 'evEbitda', label: 'EV/EBITDA', f: ratio, src: 'fundamentals' },
+  ] },
+  { group: 'Profitability', cols: [
+    { key: 'roe', label: 'ROE', f: plainPct, src: 'profitability' },
+    { key: 'roce', label: 'ROCE', f: plainPct, src: 'profitability' },
+    { key: 'roic', label: 'ROIC', f: plainPct, src: 'profitability' },
+    { key: 'roa', label: 'ROA', f: plainPct, src: 'profitability' },
+    { key: 'grossMargin', label: 'Gross margin', f: plainPct, src: 'profitability' },
+    { key: 'operatingMargin', label: 'Operating margin', f: plainPct, src: 'profitability' },
+    { key: 'netMargin', label: 'Net margin', f: plainPct, src: 'profitability' },
+  ] },
+  { group: 'Quality', cols: [
+    { key: 'debtEquity', label: 'Debt-to-equity', f: ratio, src: 'quality' },
+    { key: 'currentRatio', label: 'Current ratio', f: ratio, src: 'quality' },
+    { key: 'fcf', label: 'Free cash flow', f: crores, tone: true, src: 'quality' },
+    { key: 'piotroski', label: 'Piotroski score', f: v => (v == null ? '–' : String(v)), src: 'quality' },
+    { key: 'beta', label: 'Beta', f: ratio, src: 'quality' },
+  ] },
+  { group: 'Growth', cols: [
+    { key: 'revenueGrowth', label: 'Revenue growth', f: v => pct(v), tone: true, src: 'growth' },
+    { key: 'epsGrowth', label: 'EPS growth', f: v => pct(v), tone: true, src: 'growth' },
+    { key: 'profitGrowth', label: 'Profit growth', f: v => pct(v), tone: true, src: 'growth' },
+  ] },
+  { group: 'Momentum', cols: [
+    { key: 'pos52', label: '52-week range', f: (v, r) => (r.low52 == null ? '–' : `${money(r.low52)} – ${money(r.high52)}`), src: 'momentum' },
+    { key: 'fromHigh', label: 'From 52-week high', f: v => pct(v), tone: true, src: 'momentum' },
+    { key: 'perf1m', label: '1-month return', f: v => pct(v), tone: true, src: 'momentum' },
+    { key: 'perf3m', label: '3-month return', f: v => pct(v), tone: true, src: 'momentum' },
+    { key: 'perf6m', label: '6-month return', f: v => pct(v), tone: true, src: 'momentum' },
+    { key: 'perf1y', label: '1-year return', f: v => pct(v), tone: true, src: 'momentum' },
+    { key: 'rsi', label: 'RSI', f: ratio, src: 'momentum' },
+    { key: 'vsSma200', label: 'Vs 200-day average', f: v => pct(v), tone: true, src: 'momentum' },
+  ] },
+];
+const OPTIONAL_COLUMNS = OPTIONAL.flatMap(g => g.cols);
+
+// The chosen columns stay after the standard ones, in chooser order.
+const chosenColumns = () => {
+  const picked = new Set(A.ls.get('pfColumns', ['divYield', 'pe', 'roe']));
+  return OPTIONAL_COLUMNS.filter(c => picked.has(c.key));
+};
+const columns = () => [...COLUMNS, ...chosenColumns()];
+const columnOf = key => columns().find(c => c.key === key) ?? COLUMNS[0];
+
+const yieldLine = v => (v == null || v <= 0 ? '' : `${v.toFixed(2)}% on cost`);
 
 const GROUPS = ['Stocks', 'ETFs', 'Mutual funds', 'Crypto'];
 
@@ -104,7 +173,19 @@ function computed(account) {
     .map(p => {
       const group = groupOf(p.symbol);
       const known = A.S.market.find(m => m.symbol === p.symbol)?.name;
-      return { ...summarizePosition(p, quoteFor(p.symbol, rows)), group, name: known ?? (group === 'Mutual funds' ? p.symbol : '') };
+      const line = { ...summarizePosition(p, quoteFor(p.symbol, rows)), group, name: known ?? (group === 'Mutual funds' ? p.symbol : '') };
+      const f = A.S.market.find(m => m.symbol === p.symbol)?.f ?? {};
+      const fileRow = rows.find(r => baseSymbol(r.symbol) === p.symbol);
+      Object.assign(line, f, { sector: f.sector ?? (fileRow?.sector || undefined) });
+      // The scanner reports a 0% payout for many companies that do pay dividends.
+      if (!line.payout && line.divYield) line.payout = null;
+      const { price, high52: high, low52: low, sma200 } = line;
+      if (price != null && high != null) {
+        line.fromHigh = (price / high - 1) * 100;
+        line.pos52 = high > low ? (price - low) / (high - low) * 100 : null;
+      }
+      if (price != null && sma200) line.vsSma200 = (price / sma200 - 1) * 100;
+      return line;
     });
   const held = lines.filter(l => l.qty > EPS);
   const result = {
@@ -280,17 +361,19 @@ function hero(title, sub, up, extra = '') {
   </header>`;
 }
 
+const info = id => `<button class="pf-info" data-act="pf-info" data-id="${id}" aria-label="Data source">${icon('info')}</button>`;
+
 function stat(label, value, note = '', cls = '') {
   return `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value ${cls}">${value}</span><span class="stat-note ${cls}">${note}</span></div>`;
 }
 
 function summaryStats(s) {
   return `<div class="stats five">
-    ${stat('Total amount', money(s.value), `Invested ${money(s.cost)}${s.unpriced ? `, ${s.unpriced} unpriced left out` : ''}`)}
-    ${stat('Unrealized gain/loss', money(s.gain, true), pct(s.gainPct), tone(s.gain))}
+    ${stat(`Total amount${info('price')}`, money(s.value), `Invested ${money(s.cost)}${s.unpriced ? `, ${s.unpriced} unpriced left out` : ''}`)}
+    ${stat(`Unrealized gain/loss${info('gain')}`, money(s.gain, true), pct(s.gainPct), tone(s.gain))}
     ${stat('Realized gain/loss', money(s.realized, true), pct(s.realizedPct), tone(s.realized))}
-    ${stat('Day change', money(s.dayGain, true), pct(s.dayPct), tone(s.dayGain))}
-    ${stat('Total dividends', money(s.dividends))}
+    ${stat(`Day change${info('price')}`, money(s.dayGain, true), pct(s.dayPct), tone(s.dayGain))}
+    ${stat(`Total dividends${info('dividends')}`, money(s.dividends), s.yieldOnCost ? `${s.yieldOnCost.toFixed(2)}% yield on cost${info('yieldOnCost')}` : '')}
   </div>`;
 }
 
@@ -558,7 +641,7 @@ async function loadFiles(account, files) {
 
 /* ---------- holdings table ---------- */
 
-const sortDirLabel = () => (COLUMNS.find(c => c.key === V.sort).text
+const sortDirLabel = () => (columnOf(V.sort).text
   ? (V.dir > 0 ? 'A to Z ▲' : 'Z to A ▼')
   : (V.dir > 0 ? 'Low to high ▲' : 'High to low ▼'));
 
@@ -569,44 +652,57 @@ function rowsToShow(c) {
   const rows = linesInView(c)
     .filter(l => (V.show === 'sold' ? l.qty <= EPS : V.show === 'current' ? l.qty > EPS : true))
     .filter(l => !q || `${l.symbol} ${l.name}`.toLowerCase().includes(q));
-  const col = COLUMNS.find(x => x.key === V.sort);
+  const col = columnOf(V.sort);
   return rows.sort((a, b) => {
-    if (col.text) return (a[V.sort] || '').localeCompare(b[V.sort] || '') * V.dir;
-    return ((a[V.sort] ?? -Infinity) - (b[V.sort] ?? -Infinity)) * V.dir;
+    if (col.text) return (a[col.key] || '').localeCompare(b[col.key] || '') * V.dir;
+    return ((a[col.key] ?? -Infinity) - (b[col.key] ?? -Infinity)) * V.dir;
   });
 }
 
 function holdingsTable(account, c) {
   const rows = rowsToShow(c);
   if (!rows.length) return `<div class="empty">${icon('card')}<p>${V.q ? 'No holdings match.' : 'No holdings here. Load a tradebook or add a transaction.'}</p></div>`;
-  return GROUPS
-    .map(g => [g, rows.filter(r => r.group === g)])
-    .filter(([, list]) => list.length)
-    .map(([g, list]) => `<section class="pf-group"><h2>${g} (${list.length})</h2>${groupTable(account, list)}</section>`)
+  const key = groupKey();
+  const names = key === 'asset'
+    ? GROUPS.filter(g => rows.some(r => r.group === g))
+    : orderBands(key, new Set(rows.map(r => bandOf(key, r))));
+  const inGroup = key === 'asset' ? (r, g) => r.group === g : (r, g) => bandOf(key, r) === g;
+  return names
+    .map(g => [g, rows.filter(r => inGroup(r, g))])
+    .map(([g, list]) => `<section class="pf-group"><h2>${A.esc(g)} (${list.length})</h2>${groupTable(account, list)}</section>`)
     .join('');
+}
+
+const groupKey = () => {
+  const key = A.ls.get('pfGroupBy', 'asset');
+  return GROUPINGS[key] ? key : 'asset';
+};
+
+function columnHeader(col) {
+  const on = V.sort === col.key;
+  return `<th${col.text ? '' : ' class="num"'} aria-sort="${on ? (V.dir > 0 ? 'ascending' : 'descending') : 'none'}"><span class="pf-th"><button data-sort="${col.key}">${col.label}${on ? (V.dir > 0 ? ' ▲' : ' ▼') : ''}</button>${col.src ? info(col.src) : ''}</span></th>`;
 }
 
 function groupTable(account, rows) {
   const total = summarizeAll(rows);
+  const COLS = columns();
   const cell = (col, r) => {
     const v = r[col.key];
     if (col.text) return `<td class="pf-name" title="${A.esc(v)}">${A.esc(v) || '–'}</td>`;
-    return `<td class="num ${col.tone ? tone(v) : ''}">${col.f(v)}</td>`;
+    const sub = col.sub?.(r);
+    return `<td class="num ${col.tone ? tone(v) : ''}">${col.f(v, r)}${sub ? `<small>${sub}</small>` : ''}</td>`;
   };
   const totals = { cost: total.cost, value: total.value, dividends: total.dividends, dayGain: total.dayGain, dayPct: total.dayPct, gain: total.gain, gainPct: total.gainPct, realized: total.realized, realizedPct: total.realizedPct };
   return `<div class="holdings-wrap"><table class="holdings">
-    <thead><tr>${COLUMNS.map(col => {
-      const on = V.sort === col.key;
-      return `<th${col.text ? '' : ' class="num"'} aria-sort="${on ? (V.dir > 0 ? 'ascending' : 'descending') : 'none'}"><button data-sort="${col.key}">${col.label}${on ? (V.dir > 0 ? ' ▲' : ' ▼') : ''}</button></th>`;
-    }).join('')}</tr></thead>
+    <thead><tr>${COLS.map(columnHeader).join('')}</tr></thead>
     <tbody>${rows.map(r => {
       const details = reviewDetails(account, r.symbol);
       return `<tr>
       <th scope="row"><a href="${accountPath(account.id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(r.symbol)}</a></th>
-      ${COLUMNS.slice(1).map(col => cell(col, r)).join('')}
-    </tr>${details ? `<tr class="lot-note"><td colspan="${COLUMNS.length}">${icon('check')}${A.esc(details)}</td></tr>` : ''}`;
+      ${COLS.slice(1).map(col => cell(col, r)).join('')}
+    </tr>${details ? `<tr class="lot-note"><td colspan="${COLS.length}">${icon('check')}${A.esc(details)}</td></tr>` : ''}`;
     }).join('')}</tbody>
-    <tfoot><tr><th scope="row">Total</th>${COLUMNS.slice(1).map(col => (col.key in totals ? `<td class="num ${col.tone ? tone(totals[col.key]) : ''}">${col.f(totals[col.key])}</td>` : '<td></td>')).join('')}</tr></tfoot>
+    <tfoot><tr><th scope="row">Total</th>${COLS.slice(1).map(col => (col.key in totals ? `<td class="num ${col.tone ? tone(totals[col.key]) : ''}">${col.f(totals[col.key], total)}${col.sub?.(total) ? `<small>${col.sub(total)}</small>` : ''}</td>` : '<td></td>')).join('')}</tr></tfoot>
   </table></div>`;
 }
 
@@ -645,8 +741,13 @@ function accountView(r) {
       <label class="search flush">${icon('search')}<input type="search" id="pf-q" placeholder="Search holdings" value="${A.esc(V.q)}" autocomplete="off"></label>
       <div class="pf-sort">
         <label for="pf-sort">Sort by</label>
-        <select class="select" id="pf-sort">${COLUMNS.map(col => `<option value="${col.key}"${col.key === V.sort ? ' selected' : ''}>${col.label}</option>`).join('')}</select>
+        <select class="select" id="pf-sort">${columns().map(col => `<option value="${col.key}"${col.key === V.sort ? ' selected' : ''}>${col.label}</option>`).join('')}</select>
         <button class="btn sm" id="pf-dir">${sortDirLabel()}</button>
+      </div>
+      <div class="pf-sort">
+        <label for="pf-group">Group by</label>
+        <select class="select" id="pf-group">${Object.entries(GROUPINGS).map(([k, g]) => `<option value="${k}"${k === groupKey() ? ' selected' : ''}>${g.label}</option>`).join('')}</select>
+        <button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>
       </div>
       <div id="pf-table">${holdingsTable(account, c)}</div>
     </div></div>
@@ -659,10 +760,11 @@ function accountView(r) {
   };
   const sortBy = key => {
     V.sort = key;
-    V.dir = COLUMNS.find(c => c.key === key).text ? 1 : -1;
+    V.dir = columnOf(key).text ? 1 : -1;
     draw();
   };
   A.$('#pf-sort').addEventListener('change', e => sortBy(e.target.value));
+  A.$('#pf-group').addEventListener('change', e => { A.ls.set('pfGroupBy', e.target.value); draw(); });
   A.$('#pf-dir').addEventListener('click', () => { V.dir = -V.dir; draw(); });
   A.$('#pf-q').addEventListener('input', e => { V.q = e.target.value; draw(); });
   A.$('#pf-files').addEventListener('change', async e => {
@@ -679,6 +781,46 @@ function accountView(r) {
     V.dir = -V.dir;
     draw();
   });
+}
+
+async function chooseColumns() {
+  const picked = new Set(chosenColumns().map(c => c.key));
+  const v = await formDialog('Columns', `<div class="pf-columns">${OPTIONAL.map(g => `<fieldset><legend>${g.group}</legend>
+    ${g.cols.map(c => `<label class="switch"><input type="checkbox" name="${c.key}"${picked.has(c.key) ? ' checked' : ''}><span>${c.label}</span></label>`).join('')}
+  </fieldset>`).join('')}</div>`, 'Apply');
+  if (!v) return;
+  A.ls.set('pfColumns', OPTIONAL_COLUMNS.filter(c => v[c.key] === 'on').map(c => c.key));
+  if (!columns().some(c => c.key === V.sort)) V.sort = 'value';
+  A.refresh();
+}
+
+function showSource(id) {
+  const point = DATA_POINTS.find(d => d.id === id);
+  const names = [...new Set(point.sources.map(s => SOURCES[s].name))].join(', ');
+  A.toast(`Source: ${names}`, { label: 'Disclosure', fn: () => A.go('#/disclosure') });
+}
+
+export function disclosureView() {
+  const used = Object.entries(SOURCES);
+  const rules = Object.values(GROUPINGS).filter(g => g.rule);
+  A.view.innerHTML = `
+    <header class="topbar">${A.upButton('#/')}<div class="titles"><h1>Data disclosure</h1><p>Where every outside figure comes from</p></div>${A.menuButton}</header>
+    <div class="scroll"><div class="pay-page pf-page">
+      <p class="muted">Figures are for your own tracking, not investment advice. Free sources can be late, wrong or stop working, so check anything important against your broker. Only ticker symbols and fund or coin names are sent to these sources, never your quantities or amounts.</p>
+      <section class="panel"><h2>Data sources (${used.length})</h2><div class="holdings-wrap"><table class="holdings lots pf-disclosure">
+        <thead><tr><th>Source</th><th>Format</th><th>Timing</th><th>Notes</th></tr></thead>
+        <tbody>${used.map(([, s]) => `<tr><td>${s.url ? `<a href="${s.url}" target="_blank" rel="noopener noreferrer">${A.esc(s.name)}</a>` : A.esc(s.name)}</td><td>${A.esc(s.format)}</td><td>${A.esc(s.timing)}</td><td>${A.esc(s.note)}</td></tr>`).join('')}</tbody>
+      </table></div></section>
+      <section class="panel"><h2>Data points (${DATA_POINTS.length})</h2><div class="holdings-wrap"><table class="holdings lots pf-disclosure">
+        <thead><tr><th>Figure</th><th>Source</th><th>Format</th><th>Timing</th><th>How it's worked out</th></tr></thead>
+        <tbody>${DATA_POINTS.map(d => {
+          const list = d.sources.map(s => SOURCES[s]);
+          const unique = key => [...new Set(list.map(s => s[key]))].map(A.esc).join('<br>');
+          return `<tr><td>${A.esc(d.label)}</td><td>${unique('name')}</td><td>${unique('format')}</td><td>${unique('timing')}</td><td>${A.esc(d.how ?? '')}</td></tr>`;
+        }).join('')}</tbody>
+      </table></div></section>
+      <section class="panel"><h2>How holdings are grouped</h2><dl class="facts pf-rules">${rules.map(g => `<div><dt>${g.label}</dt><dd>${A.esc(g.rule)}</dd></div>`).join('')}</dl></section>
+    </div></div>`;
 }
 
 /* ---------- one stock ---------- */
@@ -774,6 +916,7 @@ function stockView(r) {
             ${why ? `<tr class="lot-note"><td colspan="8">${A.esc(why)}</td></tr>` : ''}`;
         }).join('')}</tbody>
       </table></div></section>` : ''}
+      ${line.marketCap != null ? `<section class="panel"><h2>Fundamentals${info('fundamentals')}</h2><dl class="facts">${OPTIONAL_COLUMNS.filter(c => line[c.key] != null).map(c => `<div><dt>${c.label}</dt><dd>${c.text ? A.esc(line[c.key]) : c.f(line[c.key], line)}</dd></div>`).join('')}</dl></section>` : ''}
       <section class="panel"><h2>Reconciliation notes</h2>${reviewBlock(account, r.symbol, p)}</section>
       <section class="panel">
         <h2>Transactions and actions</h2>
@@ -1061,6 +1204,8 @@ export async function portfolioAction(b) {
     case 'pf-menu': return accountMenu(id);
     case 'pf-refresh': return refreshMarket(true);
     case 'pf-backup': return saveBackup();
+    case 'pf-info': return showSource(id);
+    case 'pf-columns': return chooseColumns();
     case 'pf-note': return reviewNote(accountById(id), symbol);
     case 'pf-allot': return reconcileEntry(accountById(id), symbol, b.dataset.kind);
     case 'pf-match': {
@@ -1107,7 +1252,7 @@ export function portfolioView(r) {
   if (!A.S.brokerAccounts.length || !firstVisit) return;
   // Once per launch: picks up a stale market, or a load cut short by closing the app.
   firstVisit = false;
-  const unnamed = accounts().some(a => computed(a).held.some(l => !l.name));
+  const unnamed = accounts().some(a => computed(a).held.some(l => !l.name || (l.group === 'Stocks' && l.marketCap == null)));
   if (unnamed || Date.now() - A.ls.get('pfQuotedAt', 0) > QUOTE_MAX_AGE) refreshMarket();
   else refreshEvents();
 }

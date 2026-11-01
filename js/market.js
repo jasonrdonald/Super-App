@@ -8,22 +8,52 @@ const timed = (ms = 20000) => AbortSignal.timeout(ms);
 
 const tvTicker = (exchange, s) => `${exchange}:${s.replace(/-/g, '_')}`;
 
+// App field to scanner columns, best first. Only some companies report trailing
+// figures, so most fall back to the last full year.
+const FUNDAMENTALS = {
+  sector: ['sector'], industry: ['industry'], marketCap: ['market_cap_basic'],
+  divYield: ['dividends_yield_current'], eps: ['earnings_per_share_diluted_ttm'], pe: ['price_earnings_ttm'],
+  pb: ['price_book_ratio'], ps: ['price_sales_ratio'], evEbitda: ['enterprise_value_ebitda_ttm'],
+  roe: ['return_on_equity', 'return_on_equity_fy'], roce: ['return_on_capital_employed_fy'],
+  roic: ['return_on_invested_capital', 'return_on_invested_capital_fy'], roa: ['return_on_assets', 'return_on_assets_fy'],
+  grossMargin: ['gross_margin_ttm'], operatingMargin: ['operating_margin_ttm'], netMargin: ['net_margin_ttm'],
+  debtEquity: ['debt_to_equity', 'debt_to_equity_fy'], currentRatio: ['current_ratio', 'current_ratio_fy'],
+  fcf: ['free_cash_flow_ttm', 'free_cash_flow_fy'], piotroski: ['piotroski_f_score_ttm', 'piotroski_f_score_fy'],
+  payout: ['dividend_payout_ratio_ttm'], beta: ['beta_1_year'],
+  revenueGrowth: ['total_revenue_yoy_growth_ttm'], epsGrowth: ['earnings_per_share_diluted_yoy_growth_ttm'], profitGrowth: ['net_income_yoy_growth_ttm'],
+  high52: ['price_52_week_high'], low52: ['price_52_week_low'],
+  perf1m: ['Perf.1M'], perf3m: ['Perf.3M'], perf6m: ['Perf.6M'], perf1y: ['Perf.Y'], rsi: ['RSI'], sma200: ['SMA200'],
+};
+const PRICE_COLUMNS = ['close', 'change', 'change_abs', 'description'];
+const SCAN_COLUMNS = [...PRICE_COLUMNS, ...Object.values(FUNDAMENTALS).flat()];
+
+function fundamentalsFrom(d) {
+  const value = column => d[SCAN_COLUMNS.indexOf(column)];
+  const out = {};
+  for (const [field, columns] of Object.entries(FUNDAMENTALS)) {
+    const found = columns.map(value).find(v => v != null);
+    if (found != null) out[field] = found;
+  }
+  return out;
+}
+
 async function scan(tickers) {
   const res = await fetch('https://scanner.tradingview.com/india/scan', {
     method: 'POST', signal: timed(),
-    body: JSON.stringify({ symbols: { tickers }, columns: ['close', 'change', 'change_abs', 'description'] }),
+    body: JSON.stringify({ symbols: { tickers }, columns: SCAN_COLUMNS }),
   });
   if (!res.ok) throw new Error(`Price service answered ${res.status}`);
   return (await res.json()).data ?? [];
 }
 
-// Resolves to a Map of symbol to { price, change, changePct, name }.
+// Resolves to a Map of symbol to { price, change, changePct, name, f }, with
+// fundamentals in `f`.
 export async function stockQuotes(symbols) {
   const quotes = new Map();
   const fill = (list, exchange, rows) => {
     const bySymbol = new Map(list.map(s => [tvTicker(exchange, s), s]));
     for (const { s, d } of rows) {
-      if (d[0] != null) quotes.set(bySymbol.get(s), { price: d[0], changePct: d[1], change: d[2], name: d[3] });
+      if (d[0] != null) quotes.set(bySymbol.get(s), { price: d[0], changePct: d[1], change: d[2], name: d[3], f: fundamentalsFrom(d) });
     }
   };
   for (let i = 0; i < symbols.length; i += 300) {
