@@ -32,6 +32,11 @@ export const SOURCES = {
     timing: 'Static: fixed when the issue happened, and only updated with the app',
     note: 'No free source answers a browser, so new issues are added to the app or entered on Reconcile.',
   },
+  nseIndices: {
+    name: 'NSE daily index closing file, relayed by Jina Reader', url: 'https://www.nseindia.com/', format: 'CSV, inside a text wrapper from the relay',
+    timing: 'Published each trading evening. Checked again after 6 hours',
+    note: 'The latest file, plus one month-end file a month back to your first purchase.',
+  },
   curated: {
     name: 'Company announcements and traded prices', url: '', format: 'Entered into the app by hand',
     timing: 'Static: only updated with the app',
@@ -56,7 +61,7 @@ const STOCK_FILE = [
   ['Monthly open and close, in today\'s share units', 'yahoo'],
   ['Dividends and splits', 'yahoo'],
   ['Latest price and day change', 'tradingview'],
-  ['Names, sector, fundamentals and momentum', 'tradingviewFundamentals'],
+  ['Names, sector, fundamentals, momentum and yearly EPS', 'tradingviewFundamentals'],
 ];
 
 export const BACKUP_FILES = [
@@ -65,7 +70,7 @@ export const BACKUP_FILES = [
   { id: 'crypto', label: 'Crypto', parts: [['Monthly open and close, in rupees', 'yahoo'], ['Latest price and day change', 'coingecko']] },
   { id: 'mutual-funds', label: 'Mutual funds', parts: [['Each month\'s first and last NAV', 'mfapi'], ['Latest NAV and scheme code', 'mfapi']] },
   { id: 'fx', label: 'Currency rates', parts: [['Latest USD to INR rate', 'tradingview']] },
-  { id: 'indices', label: 'Benchmark indices', parts: [['Monthly open and close of Nifty 50, Nifty Next 50, Nifty Midcap 150, Nasdaq 100 and S&P 500', 'yahoo']] },
+  { id: 'indices', label: 'Benchmark indices', parts: [['Monthly open and close of Nifty 50, Next 50, Midcap 150, Smallcap 250, Nifty 500, Nasdaq 100 and S&P 500', 'yahoo'], ['Latest close, P/E, P/B and dividend yield of Nifty indices', 'nseIndices'], ['Nifty index P/E and P/B at each month-end, under IX:pe', 'nseIndices']] },
 ];
 
 export const backupSources = id => Object.fromEntries(BACKUP_FILES.find(f => f.id === id).parts.map(([what, source]) => [what, SOURCES[source].name]));
@@ -83,7 +88,11 @@ export const BACKUP_CONTENTS = [
   ['ROE, ROCE, ROIC, ROA and margins', 'Latest only', 'quotes'],
   ['Debt-to-equity, current ratio, free cash flow, Piotroski score, payout and beta', 'Latest only', 'quotes'],
   ['Revenue, EPS and profit growth', 'Latest only', 'quotes'],
-  ['52-week range, returns, RSI and 200-day average', 'Latest only', 'quotes'],
+  ['Yearly EPS of each Indian stock, adjusted for splits', 'Full history, by financial year-end', 'prices, under EP'],
+  ['52-week and all-time range, returns, RSI and 200-day average', 'Latest only', 'quotes'],
+  ['Five-year growth rates and median P/E by sector', 'Latest only', 'quotes, with sector P/Es in the indices folder'],
+  ['Nifty index P/E, P/B and dividend yield', 'Latest only', 'quotes, in the indices folder'],
+  ['Nifty index P/E and P/B at each month-end', 'Full history, from your first purchase', 'prices, in the indices folder'],
 ];
 
 export const BACKUP_LEAVES_OUT = [
@@ -105,6 +114,9 @@ export const DATA_POINTS = [
   { id: 'xirr', label: 'XIRR', sources: ['app', 'broker', 'yahoo', 'tradingview'], how: 'Annual return on dated cash flows: each lot\'s cost, sale proceeds, dividends before tax, and today\'s value. Holdings under a year are annualised, so short periods can look extreme.' },
   { id: 'capitalGains', label: 'Capital gains report', sources: ['broker', 'app'], how: 'Sells matched to buys, oldest first. Long term is over 12 months, or over 24 for US shares. Same-day trades are intraday. Excludes charges and does not apply tax rules such as debt fund treatment, so it is not a tax computation.' },
   { id: 'performance', label: 'Performance report', sources: ['broker', 'yahoo', 'app'], how: 'Your XIRR, against what the same cash flows on the same dates would have made in each index. Index values on a date are read between that month\'s open and close. On the chart, a shorter period restarts each index from your value on its first month, and prices are monthly, so 1M runs from the last month-end. Indices are price indices, so they leave out dividends, while your return includes them. US indices are in dollars, so they leave out rupee moves. Nifty Midcap 150 history starts in January 2019, and earlier money counts from then. Commodities and crypto are left out.' },
+  { id: 'performers', label: 'Top and worst performers', sources: ['broker', 'app', 'tradingview'], how: 'Stocks held today, combined across brokers. Total return is price gain, realized gain and dividends, divided by all the money put into that stock. Share of total return can pass 100%, as losses elsewhere reduce the total.' },
+  { id: 'metrics', label: 'Metrics report', sources: ['tradingviewFundamentals', 'nseIndices', 'yahoo', 'mfapi', 'app'], how: 'Indian stocks held today, without ETFs. Your P/E is total value over total earnings in each market cap band, so loss-makers lower the earnings. The app\'s bands use market cap, while each index picks its own stocks, so the match is close, not exact. Your earnings are trailing diluted EPS, and NSE works out index P/E its own way. P/E when you bought is what you paid for the lots you still hold, over their EPS for the last financial year ended before each purchase, adjusted for splits. Results come out a month or two after a year ends, so this can use figures not yet published when you bought. The index figure uses its P/E at the end of the month you bought. Volatility is the spread of monthly open-to-close returns, times the square root of 12, for holdings held from each month\'s start. Alpha is your XIRR on a stock less the same cash flows in the index for its market cap, which is Nifty 50, Midcap 150 or Smallcap 250, as Microcap 250 has no monthly history. It does not adjust for risk.' },
+  { id: 'ratings', label: 'Rating report', sources: ['tradingviewFundamentals', 'tradingview', 'app'], how: 'The app\'s own rules applied to public figures, not ratings from any source and not advice. Returns and highs and lows are from TradingView. Growth uses five years of yearly EPS, or revenue if a year made a loss. Valuation compares P/E with the median of NSE stocks above ₹500 Cr in the same sector. Each rating shows its rule on the report.' },
   { id: 'publicData', label: 'Public data source', sources: ['tradingview', 'yahoo', 'mfapi', 'coingecko'], how: 'Set on the Data sources page. Internet downloads everything. Local backup downloads nothing and uses imported files, so figures stop at the backup\'s date. Hybrid downloads recent months and today\'s prices, and keeps older months from the backup. If a split happens later, older backup months are rescaled to match.' },
   { id: 'timeline', label: 'Timeline report', sources: ['broker', 'app', 'yahoo', 'mfapi'], how: 'Invested is the cost of what you held at each date, from your trades, with USD at today\'s rate. Past market value appears only when switched on, and is an estimate: shares held at each month\'s end times that month\'s close, from Yahoo for stocks, ETFs and crypto, and MFapi.in for funds. A held item with no price for a month is taken as moving steadily from its cost to today\'s price, and a sold one counts at cost. Those monthly prices stay on this device, go in the public data backup rather than broker backups, and refresh weekly. Highlights are picked from your trades, dividends, transfers and corporate actions, and start from your earliest loaded file.' },
   { id: 'fees', label: 'Fees and charges', sources: ['broker'], how: 'Taken from broker files that show them. Aionion Capital charges are net value less trade value. Coins deducted are valued at their FIFO cost. Network fees are entered on each transfer.' },

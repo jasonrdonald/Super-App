@@ -27,10 +27,34 @@ const FUNDAMENTALS = {
   payout: ['dividend_payout_ratio_ttm'], beta: ['beta_1_year'],
   revenueGrowth: ['total_revenue_yoy_growth_ttm'], epsGrowth: ['earnings_per_share_diluted_yoy_growth_ttm'], profitGrowth: ['net_income_yoy_growth_ttm'],
   high52: ['price_52_week_high'], low52: ['price_52_week_low'],
-  perf1m: ['Perf.1M'], perf3m: ['Perf.3M'], perf6m: ['Perf.6M'], perf1y: ['Perf.Y'], rsi: ['RSI'], sma200: ['SMA200'],
+  perf1w: ['Perf.W'], perf1m: ['Perf.1M'], perf3m: ['Perf.3M'], perf6m: ['Perf.6M'], perf1y: ['Perf.Y'], perf5y: ['Perf.5Y'], rsi: ['RSI'], sma200: ['SMA200'],
+  allHigh: ['High.All'], allLow: ['Low.All'],
 };
 const PRICE_COLUMNS = ['close', 'change', 'change_abs', 'description'];
-const SCAN_COLUMNS = [...PRICE_COLUMNS, ...Object.values(FUNDAMENTALS).flat()];
+// Yearly history, newest first and adjusted for splits, is read for its growth rates only.
+const HISTORY_COLUMNS = ['earnings_per_share_diluted_fy_h', 'total_revenue_fy_h', 'fiscal_period_end_fy'];
+const SCAN_COLUMNS = [...PRICE_COLUMNS, ...Object.values(FUNDAMENTALS).flat(), ...HISTORY_COLUMNS];
+
+// Yearly growth over up to five years, and over its recent and earlier parts, on
+// earnings where every year made a profit and on revenue otherwise.
+function growthFrom(eps, revenue) {
+  const span = list => (Array.isArray(list) ? list.slice(0, 6).filter(v => v != null).reverse() : []);
+  const profitable = span(eps);
+  const run = profitable.length >= 4 && profitable.every(v => v > 0) ? profitable : span(revenue);
+  if (run.length < 4 || run.some(v => v <= 0)) return {};
+  const rate = (from, to) => ((run[to] / run[from]) ** (1 / (to - from)) - 1) * 100;
+  const last = run.length - 1;
+  return { gBasis: run === profitable ? 'EPS' : 'Revenue', gCagr: rate(0, last), gRecent: rate(last - 2, last), gEarly: rate(0, last - 2) };
+}
+
+// EPS by the month each financial year ended, counting back from the latest year-end.
+function yearlyEps(d) {
+  const list = d[SCAN_COLUMNS.indexOf(HISTORY_COLUMNS[0])];
+  const end = d[SCAN_COLUMNS.indexOf(HISTORY_COLUMNS[2])];
+  if (!Array.isArray(list) || !end) return {};
+  const [year, month] = new Date(end * 1000).toISOString().slice(0, 7).split('-');
+  return Object.fromEntries(list.flatMap((eps, i) => (eps == null ? [] : [[`${Number(year) - i}-${month}`, eps]])));
+}
 
 function fundamentalsFrom(d) {
   const value = column => d[SCAN_COLUMNS.indexOf(column)];
@@ -39,7 +63,7 @@ function fundamentalsFrom(d) {
     const found = columns.map(value).find(v => v != null);
     if (found != null) out[field] = found;
   }
-  return out;
+  return { ...out, ...growthFrom(value(HISTORY_COLUMNS[0]), value(HISTORY_COLUMNS[1])) };
 }
 
 async function scan(tickers) {
@@ -58,7 +82,7 @@ export async function stockQuotes(symbols) {
   const fill = (list, exchange, rows) => {
     const bySymbol = new Map(list.map(s => [tvTicker(exchange, s), s]));
     for (const { s, d } of rows) {
-      if (d[0] != null) quotes.set(bySymbol.get(s), { price: d[0], changePct: d[1], change: d[2], name: d[3], f: fundamentalsFrom(d) });
+      if (d[0] != null) quotes.set(bySymbol.get(s), { price: d[0], changePct: d[1], change: d[2], name: d[3], f: fundamentalsFrom(d), epsYears: yearlyEps(d) });
     }
   };
   for (let i = 0; i < symbols.length; i += 300) {
@@ -113,6 +137,20 @@ export async function listedSecurities() {
   return listed;
 }
 
+// The median P/E of each sector across NSE stocks above ₹500 Cr, with at least five to compare.
+export async function sectorPes() {
+  const res = await web('https://scanner.tradingview.com/india/scan', {
+    method: 'POST', signal: timed(40000),
+    body: JSON.stringify({ filter: [{ left: 'exchange', operation: 'equal', right: 'NSE' }, { left: 'market_cap_basic', operation: 'greater', right: 5e9 }], columns: ['sector', 'price_earnings_ttm'], range: [0, 5000] }),
+  });
+  if (!res.ok) throw new Error(`Price service answered ${res.status}`);
+  const bySector = new Map();
+  for (const { d: [sector, pe] } of (await res.json()).data ?? []) {
+    if (sector && pe > 0) bySector.set(sector, [...(bySector.get(sector) ?? []), pe]);
+  }
+  return Object.fromEntries([...bySector].filter(([, list]) => list.length >= 5).map(([sector, list]) => [sector, list.sort((a, b) => a - b)[Math.floor(list.length / 2)]]));
+}
+
 /* ---------- splits and dividends: Yahoo Finance, through a reader that relays it ---------- */
 
 export const EVENT_GAP_MS = 3300;
@@ -164,6 +202,33 @@ export async function stockEvents(symbol, from, us) {
     splits: Object.values(events.splits ?? {}).map(s => ({ date: dayOf(s.date), num: s.numerator, den: s.denominator })),
     dividends: Object.values(events.dividends ?? {}).map(d => ({ date: dayOf(d.date), amount: d.amount })),
   };
+}
+
+// NSE's daily closing file, which has each index's P/E, P/B and dividend yield. The
+// day's file appears in the evening, and none exist for holidays, so this looks back.
+export const indexValuations = () => closingBefore(new Date(), 7);
+
+// The last file of a month, for the index P/Es at that month's end.
+export function monthEndValuations(key) {
+  const [year, month] = key.split('-').map(Number);
+  return closingBefore(new Date(year, month, 0), 7);
+}
+
+async function closingBefore(from, days) {
+  const day = new Date(from);
+  for (let tries = 0; tries < days; tries++, day.setDate(day.getDate() - 1)) {
+    if (day.getDay() === 0 || day.getDay() === 6) continue;
+    const stamp = [day.getDate(), day.getMonth() + 1].map(n => String(n).padStart(2, '0')).join('') + day.getFullYear();
+    const text = await relays[0](`https://nsearchives.nseindia.com/content/indices/ind_close_all_${stamp}.csv`).catch(() => '');
+    const at = text.indexOf('Index Name,');
+    if (at >= 0) {
+      const rows = text.slice(at).split('\n').slice(1).map(line => line.trim().split(','));
+      const value = s => (Number.isFinite(Number(s)) && s !== '' ? Number(s) : null);
+      return new Map(rows.filter(r => r.length >= 13).map(r => [r[0], { date: r[1], close: value(r[5]), pe: value(r[10]), pb: value(r[11]), divYield: value(r[12]) }]));
+    }
+    await new Promise(r => setTimeout(r, EVENT_GAP_MS));
+  }
+  return null;
 }
 
 // Month to [open, close], in today's share units as Yahoo adjusts for splits.

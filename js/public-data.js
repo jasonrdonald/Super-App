@@ -14,6 +14,7 @@ function marketOf(symbol, rec) {
   if (symbol.startsWith('CR:')) return 'crypto';
   if (symbol.startsWith('FX:')) return 'fx';
   if (symbol.startsWith('IX:')) return 'indices';
+  if (symbol.startsWith('EP:')) return 'india-stocks';
   return rec?.schemeCode || /[^A-Z0-9&_.-]/.test(symbol) ? 'mutual-funds' : 'india-stocks';
 }
 
@@ -110,7 +111,7 @@ export function publicSummary(market, priceMonths) {
   }
   for (const { symbol, months } of priceMonths) {
     const keys = Object.keys(months).sort();
-    if (!keys.length) continue;
+    if (!keys.length || /^(IX:pe|EP):/.test(symbol)) continue;
     const row = rows[marketOf(symbol, records.get(symbol))];
     row.withHistory++;
     keys.forEach(k => row.months.add(k));

@@ -514,6 +514,28 @@ th.num .pf-th { justify-content: flex-end; }
 .holdings thead th:first-child { z-index: 2; }
 .holdings.pf-summary thead th { padding: 8px 10px; }
 
+/* ---------- ratings ---------- */
+
+.rt { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.rt-text { display: grid; line-height: 1.2; }
+.rt-text b { font-size: .8rem; font-weight: 650; color: var(--text); }
+.rt-text small { font-size: .68rem; color: var(--muted); }
+.rt-icon { width: 34px; height: 18px; flex: none; color: var(--rt); }
+.rt-fill { fill: var(--rt); }
+.rt-off { fill: var(--border); }
+.rt-line { fill: none; stroke: var(--rt); stroke-width: 2.4; stroke-linecap: round; }
+.rt-rail { stroke: var(--muted); stroke-width: 1.5; opacity: .6; }
+.rt-best, .rt-good { --rt: var(--good); }
+.rt-mid { --rt: var(--muted); }
+.rt-poor { --rt: var(--warn); }
+.rt-worst { --rt: var(--danger); }
+.rt-table td { vertical-align: middle; }
+.rt-scales { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.rt-scale h3 { margin: 0 0 6px; font-size: .9rem; }
+.rt-scale p { margin: 6px 0 0; font-size: .74rem; }
+.rt-key { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: .8rem; }
+.rt-key span { flex: 1; }
+
 /* ---------- data sources ---------- */
 
 .pf-modes { display: grid; gap: 8px; margin-bottom: 10px; }
@@ -536,6 +558,14 @@ th.num .pf-th { justify-content: flex-end; }
 .g-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .g-key { width: 14px; height: 3px; border-radius: 2px; background: var(--accent); }
 .g-key.invested { background: var(--muted); }
+.g-bar.up { fill: #2a78d6; }
+.g-bar.loss { fill: #d64545; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .g-bar.up { fill: #3987e5; }
+  :root:not([data-theme="light"]) .g-bar.loss { fill: #d95555; }
+}
+:root[data-theme="dark"] .g-bar.up { fill: #3987e5; }
+:root[data-theme="dark"] .g-bar.loss { fill: #d95555; }
 .pf-chart { min-height: 0; }
 .g-title { margin: 14px 0 2px; font-size: .9rem; }
 .g-series { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; stroke: var(--series); }

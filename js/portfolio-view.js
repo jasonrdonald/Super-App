@@ -3,12 +3,12 @@ import * as db from './db.js';
 import { CONFIG } from './config.js';
 import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, allActions, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
-import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, setOffline, EVENT_GAP_MS } from './market.js';
+import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, setOffline, EVENT_GAP_MS } from './market.js';
 import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, unzipFiles } from './public-data.js';
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS, BACKUP_FILES, BACKUP_CONTENTS, BACKUP_LEAVES_OUT, BACKUP_NEEDS_NOTHING } from './disclosures.js';
-import { GROUPINGS, bandOf, orderBands } from './ratings.js';
+import { GROUPINGS, bandOf, orderBands, RATING_SCALES, momentumRating, growthRating, valuationRating, profitabilityRating } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
 const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Nippon MF', 'Aionion Capital', 'Zebpay', 'Blockchain Wallet', 'Coinbase Wallet', 'Other'];
@@ -425,7 +425,16 @@ async function refreshQuotes() {
   const t = Date.now();
   const changed = [];
   const apply = (symbol, q) => changed.push(saveMarket(symbol, { ...q, quotedAt: t }));
-  if (stock.size) (await stockQuotes([...stock])).forEach((q, s) => apply(s, q));
+  if (stock.size) {
+    const years = [];
+    (await stockQuotes([...stock])).forEach(({ epsYears, ...q }, s) => {
+      apply(s, q);
+      if (Object.keys(epsYears).length) years.push({ symbol: epsKey(s), months: Object.fromEntries(Object.entries(epsYears).map(([k, eps]) => [k, [eps, 0]])), at: t });
+    });
+    const ids = new Set(years.map(m => m.symbol));
+    A.S.priceMonths = [...A.S.priceMonths.filter(m => !ids.has(m.symbol)), ...years];
+    await db.putMany('priceMonths', years);
+  }
   if (us.size) {
     (await usQuotes([...us])).forEach((q, s) => apply(US_PREFIX + s, q));
     const rate = await usdInr();
@@ -447,6 +456,17 @@ async function refreshQuotes() {
     const near = fileRow(name)?.close || lastTrade?.price;
     const q = await fundQuote(name, near).catch(() => null);
     if (q && (!near || Math.abs(q.price - near) / near < 0.2)) apply(name, q);
+  }
+  if (t - (A.S.market.find(m => m.symbol === benchmarkKey('nifty50'))?.quotedAt ?? 0) > QUOTE_MAX_AGE) {
+    const closes = await indexValuations().catch(() => null);
+    for (const [id, name] of Object.entries(NSE_INDICES)) {
+      const row = closes?.get(name);
+      if (row?.close != null) apply(benchmarkKey(id), { price: row.close, name, f: { pe: row.pe, pb: row.pb, divYield: row.divYield, asOf: row.date } });
+    }
+  }
+  if (t - (A.S.market.find(m => m.symbol === SECTOR_PE_KEY)?.quotedAt ?? 0) > QUOTE_MAX_AGE) {
+    const sectors = await sectorPes().catch(() => null);
+    if (sectors) apply(SECTOR_PE_KEY, { price: 0, name: 'Median P/E by sector', f: sectors });
   }
   await db.putMany('market', changed);
   A.ls.set('pfQuotedAt', t);
@@ -528,8 +548,13 @@ const BENCHMARKS = {
   mid150: ['Nifty Midcap 150', 'NIFTYMIDCAP150.NS'],
   nasdaq100: ['Nasdaq 100', '^NDX'],
   sp500: ['S&P 500', '^GSPC'],
+  small250: ['Nifty Smallcap 250', 'NIFTYSMLCAP250.NS'],
+  nifty500: ['Nifty 500', '^CRSLDX'],
 };
 const benchmarkKey = id => `IX:${id}`;
+const SECTOR_PE_KEY = 'IX:sectorpe';
+// Named as in NSE's closing file. Microcap 250 has a P/E there but no monthly history.
+const NSE_INDICES = { nifty50: 'Nifty 50', next50: 'Nifty Next 50', mid150: 'Nifty Midcap 150', small250: 'Nifty Smallcap 250', micro250: 'Nifty Microcap 250', nifty500: 'Nifty 500' };
 
 // The indices, then everything ever held that has a price series, biggest first,
 // as a first load takes minutes. Holdings only load for the Past market value switch.
@@ -579,6 +604,47 @@ async function refreshMonthly() {
     if (job.done % 10 === 0) redraw();
     else showStatus();
     if (x.kind !== 'fund') await new Promise(r => setTimeout(r, Math.max(0, EVENT_GAP_MS - (Date.now() - started))));
+  }
+  job.running = false;
+  redraw();
+  refreshPeHistory();
+}
+
+// Month-end index P/E and P/B, stored like monthly prices. Past files never change.
+const peKey = id => `IX:pe:${id}`;
+const epsKey = symbol => `EP:${symbol}`;
+let peWanted = false, peLoaded = false;
+
+// When the Metrics report first opens, as this means one file a month back to your first buy.
+async function refreshPeHistory() {
+  if (!peWanted || peLoaded || job.running || dataMode() === 'backup') return;
+  const lots = accounts().filter(a => a.kind === 'stock' && !isUsd(a)).flatMap(a => [...computed(a).positions.values()].flatMap(p => p.lots));
+  const first = lots.reduce((d, l) => (l.date < d ? l.date : d), '9999').slice(0, 7);
+  const now = monthKey(new Date().toISOString());
+  const have = A.S.priceMonths.find(m => m.symbol === peKey('nifty50'))?.months ?? {};
+  const list = [];
+  for (let k = first; k < now && first !== '9999'; k = nextMonth(k)) if (!have[k]) list.push(k);
+  peLoaded = true;
+  if (!list.length) return;
+  Object.assign(job, { running: true, done: 0, total: list.length, failed: 0, what: 'index P/E history' });
+  showStatus();
+  for (const k of list) {
+    const started = Date.now();
+    const closes = await monthEndValuations(k).catch(() => null);
+    if (!closes) job.failed++;
+    const changed = Object.entries(NSE_INDICES).flatMap(([id, name]) => {
+      const row = closes?.get(name);
+      if (row?.pe == null) return [];
+      const old = A.S.priceMonths.find(m => m.symbol === peKey(id));
+      return [{ symbol: peKey(id), months: { ...old?.months, [k]: [row.pe, row.pb ?? 0] }, at: Date.now() }];
+    });
+    const ids = new Set(changed.map(m => m.symbol));
+    A.S.priceMonths = [...A.S.priceMonths.filter(m => !ids.has(m.symbol)), ...changed];
+    await db.putMany('priceMonths', changed);
+    job.done++;
+    if (job.done % 10 === 0) redraw();
+    else showStatus();
+    await new Promise(r => setTimeout(r, Math.max(0, EVENT_GAP_MS - (Date.now() - started))));
   }
   job.running = false;
   redraw();
@@ -1205,7 +1271,7 @@ function disclosureView() {
 /* ---------- reports ---------- */
 
 const R = { broker: 'all', year: 'all' };
-const REPORTS = { timeline: 'Timeline', performance: 'Performance', dividends: 'Dividends', gains: 'Capital gains', earn: 'Crypto earnings', fees: 'Fees' };
+const REPORTS = { timeline: 'Timeline', performance: 'Performance', metrics: 'Metrics', rating: 'Rating', dividends: 'Dividends', gains: 'Capital gains', earn: 'Crypto earnings', fees: 'Fees' };
 
 // Indian financial years run April to March, named by the year they start.
 const fyStart = date => Number(date.slice(0, 4)) - (date.slice(5, 7) < '04' ? 1 : 0);
@@ -2013,10 +2079,131 @@ function drawLines(box, chart) {
   box.onpointerleave = () => { tip.hidden = true; cross.setAttribute('hidden', ''); };
 }
 
+function drawHistogram(box, { bins, edges }) {
+  const w = box.clientWidth, h = 230;
+  const m = { l: 10, r: 10, t: 22, b: 26 };
+  const slot = (w - m.l - m.r) / bins.length;
+  const peak = Math.max(...bins.map(b => b.count)) || 1;
+  const y = v => h - m.b - v / peak * (h - m.t - m.b);
+  const bar = Math.min(24, slot * 0.7);
+  box.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    <line class="g-grid" x1="${m.l}" x2="${w - m.r}" y1="${y(0)}" y2="${y(0)}"/>
+    ${edges.map((edge, i) => `<text class="g-axis" x="${m.l + slot * (i + 1)}" y="${h - 8}" text-anchor="middle">${edge}%</text>`).join('')}
+    ${bins.map((b, i) => {
+      if (!b.count) return '';
+      const left = m.l + slot * i + (slot - bar) / 2, top = y(b.count), r = Math.min(4, y(0) - top);
+      return `<path class="g-bar ${b.loss ? 'loss' : 'up'}" d="M${left} ${y(0)}V${top + r}Q${left} ${top} ${left + r} ${top}H${left + bar - r}Q${left + bar} ${top} ${left + bar} ${top + r}V${y(0)}Z"/>
+        <text class="g-label" x="${left + bar / 2}" y="${top - 6}" text-anchor="middle">${b.count}</text>`;
+    }).join('')}
+  </svg><div class="g-tip" hidden></div>`;
+  const tip = box.querySelector('.g-tip');
+  box.onpointermove = e => {
+    const rect = box.getBoundingClientRect();
+    const b = bins[Math.floor((e.clientX - rect.left - m.l) / slot)];
+    tip.hidden = !b;
+    if (!b) return;
+    tip.innerHTML = `<strong>${b.label}</strong><span>${A.plural(b.count, 'stock')}, ${b.share.toFixed(1)}% of stock value</span>${b.names ? `<span>${A.esc(b.names)}</span>` : ''}`;
+    tip.style.left = `${Math.min(Math.max(e.clientX - rect.left - tip.offsetWidth / 2, 0), w - tip.offsetWidth)}px`;
+  };
+  box.onpointerleave = () => { tip.hidden = true; };
+}
+
 const drawChart = box => {
   const chart = perfCharts[box.dataset.chart];
-  if (chart) drawLines(box, inRange(chart));
+  if (chart?.bins) drawHistogram(box, chart);
+  else if (chart) drawLines(box, inRange(chart));
 };
+
+/* ---------- top and worst stocks ---------- */
+
+const TOP_SIZES = [10, 20, 30];
+const topSize = () => { const n = A.ls.get('pfPerfTop', 10); return TOP_SIZES.includes(n) ? n : 10; };
+const RETURN_EDGES = [-50, -25, 0, 25, 50, 100, 200];
+
+// Stocks held today, one row a ticker across brokers. Return counts price gain,
+// realized gain and dividends against all the money ever put in.
+function heldByTicker(rows) {
+  const byTicker = new Map();
+  for (const line of rows.filter(l => l.group === 'Stocks' && l.qty > EPS && l.value != null)) {
+    const key = marketPrefix(line.account) + line.symbol;
+    byTicker.set(key, [...(byTicker.get(key) ?? []), { account: line.account, line }]);
+  }
+  return [...byTicker.values()];
+}
+
+function stockReturns(rows) {
+  return heldByTicker(rows).map(mergeLines).map(l => {
+    const put = l.cost + l.soldCost;
+    const made = (l.gain ?? 0) + l.realized + l.dividends;
+    return { ...l, put, made, ret: put > 0 ? made / put * 100 : null };
+  }).filter(l => l.ret != null).sort((a, b) => b.ret - a.ret);
+}
+
+function returnBins(stocks) {
+  const total = stocks.reduce((n, l) => n + l.value, 0);
+  const lows = [-Infinity, ...RETURN_EDGES];
+  return lows.map((low, i) => {
+    const high = lows[i + 1] ?? Infinity;
+    const list = stocks.filter(l => l.ret >= low && l.ret < high);
+    const label = low === -Infinity ? `Below ${high}%` : high === Infinity ? `${low}% or more` : `${low}% to ${high}%`;
+    const names = list.slice(0, 5).map(l => l.symbol).join(', ') + (list.length > 5 ? ` and ${list.length - 5} more` : '');
+    return { label, loss: high <= 0, count: list.length, share: total ? list.reduce((n, l) => n + l.value, 0) / total * 100 : 0, names };
+  });
+}
+
+function performerRows(list) {
+  return `<div class="holdings-wrap"><table class="holdings pf-summary">
+    <thead><tr><th>Ticker</th><th>Stock name</th><th>Brokers</th>${['Money put in', 'Market value', 'Total return', 'Return', 'XIRR'].map(h => `<th class="num">${h}</th>`).join('')}</tr></thead>
+    <tbody>${list.map(l => `<tr>
+      <th scope="row"><a href="${accountPath(l.holders[0].id)}/h/${encodeURIComponent(l.symbol)}">${A.esc(l.symbol)}</a></th>
+      <td class="pf-name" title="${A.esc(l.name)}">${A.esc(l.name) || '–'}</td>
+      <td class="pf-name" title="${A.esc(l.brokers)}">${A.esc(l.brokers)}</td>
+      <td class="num">${money(l.put)}</td>
+      <td class="num">${money(l.value)}</td>
+      <td class="num ${tone(l.made)}">${money(l.made, true)}</td>
+      <td class="num ${tone(l.ret)}">${pct(l.ret)}</td>
+      <td class="num ${tone(l.xirr)}">${pct(l.xirr)}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function performersPanel(rows) {
+  const stocks = stockReturns(rows);
+  if (!stocks.length) return '';
+  const size = topSize();
+  const n = Math.min(size, Math.floor(stocks.length / 2));
+  const top = stocks.slice(0, n), worst = stocks.slice(stocks.length - n).reverse();
+  const rest = stocks.slice(n, stocks.length - n);
+  const sum = (list, key) => list.reduce((t, l) => t + l[key], 0);
+  const whole = { made: sum(stocks, 'made'), value: sum(stocks, 'value') };
+  const line = (label, list) => {
+    const put = sum(list, 'put'), made = sum(list, 'made'), value = sum(list, 'value');
+    return `<tr><th scope="row">${label}</th><td class="num">${list.length}</td><td class="num">${money(put)}</td><td class="num">${money(value)}</td>
+      <td class="num ${tone(made)}">${money(made, true)}</td><td class="num ${tone(made)}">${pct(put ? made / put * 100 : null)}</td>
+      <td class="num">${plainPct(whole.value ? value / whole.value * 100 : null)}</td>
+      <td class="num ${tone(made)}">${whole.made ? pct(made / whole.made * 100) : '–'}</td></tr>`;
+  };
+  const up = stocks.filter(l => l.ret > 0).length;
+  const middle = stocks[Math.floor(stocks.length / 2)].ret;
+  return `<section class="panel"><h2>Top and worst performers${info('performers')}</h2>
+    <p class="muted small chart-note">Stocks held today, ranked by total return: price gain, realized gain and dividends, on all the money put in, including shares sold since. ETFs, funds, debt, commodities and crypto are left out.</p>
+    <div class="seg pf-assets" role="group" aria-label="How many stocks">${TOP_SIZES.map(k => `<button data-top="${k}" aria-pressed="${k === size}">Top and worst ${k}</button>`).join('')}</div>
+    ${n < size ? `<p class="muted small chart-note">Only ${A.plural(stocks.length, 'stock')} here, so this shows ${n} each way.</p>` : ''}
+    <h3 class="g-title">Top ${n} and worst ${n} against total returns</h3>
+    <div class="holdings-wrap"><table class="holdings pf-summary">
+      <thead><tr><th>Stocks</th>${['Count', 'Money put in', 'Market value', 'Total return', 'Return', 'Share of value', 'Share of total return'].map(h => `<th class="num">${h}</th>`).join('')}</tr></thead>
+      <tbody>${line(`Top ${n}`, top)}${line(`Worst ${n}`, worst)}${rest.length ? line('All others', rest) : ''}</tbody>
+      <tfoot>${line('Total', stocks)}</tfoot>
+    </table></div>
+    <h3 class="g-title">How your stocks' returns are spread</h3>
+    <p class="muted small chart-note">${up} of ${A.plural(stocks.length, 'stock')} are up. The middle stock has returned ${pct(middle)}.</p>
+    ${chartSlot({ bins: returnBins(stocks), edges: RETURN_EDGES })}
+    <h3 class="g-title">Top ${n}</h3>
+    ${performerRows(top)}
+    <h3 class="g-title">Worst ${n}</h3>
+    ${performerRows(worst)}
+  </section>`;
+}
 
 function perfTable(title, groups, indices, noIndex = [], growth = null, growthNote = '') {
   if (!groups.length) return '';
@@ -2074,12 +2261,333 @@ function performanceReport() {
     </div>
     <div class="status" id="pf-status">${statusLine()}</div>
     ${tables.join('')}
+    ${performersPanel(rows)}
     <p class="muted small chart-note">Each index column shows the annual return if the same money had gone in and out of that index on the same dates. Indices leave out dividends, and US indices are in dollars, so they leave out rupee moves.</p>`;
+}
+
+/* ---------- metrics ---------- */
+
+const CAP_PE_INDICES = { 'Large cap': ['nifty50', 'next50'], 'Mid cap': ['mid150'], 'Small cap': ['small250'], 'Micro cap': ['micro250'] };
+const CAP_RETURN_INDEX = { 'Large cap': 'nifty50', 'Mid cap': 'mid150', 'Small cap': 'small250', 'Micro cap': 'small250' };
+const VOL_INDICES = ['nifty50', 'next50', 'mid150', 'small250', 'nifty500'];
+const VOL_PERIODS = [[12, '1Y'], [36, '3Y'], [60, '5Y']];
+
+const indexFigures = id => A.S.market.find(m => m.symbol === benchmarkKey(id))?.f;
+
+// A holding's share of earnings, so a loss-maker counts against the total.
+function earningsOf(l) {
+  if (l.eps != null && l.price) return l.value * l.eps / l.price;
+  return l.pe > 0 ? l.value / l.pe : null;
+}
+
+// Total value over total earnings, the P/E of the holdings taken as one company.
+function weightedPe(list) {
+  const known = list.filter(l => earningsOf(l) != null);
+  const earnings = known.reduce((n, l) => n + earningsOf(l), 0);
+  return earnings > 0 ? known.reduce((n, l) => n + l.value, 0) / earnings : null;
+}
+
+const medianPe = list => {
+  const known = list.map(l => l.pe).filter(v => v > 0).sort((a, b) => a - b);
+  return known.length ? known[Math.floor(known.length / 2)] : null;
+};
+
+function peTable(bands, merged) {
+  const total = merged.reduce((n, l) => n + l.value, 0);
+  const row = (label, list, indices, cls = '') => indices.map((id, i) => {
+    const yours = weightedPe(list), theirs = indexFigures(id)?.pe;
+    const gap = yours != null && theirs ? (yours / theirs - 1) * 100 : null;
+    return `<tr class="${cls}"><th scope="row">${i ? '' : label}</th>
+      <td class="num">${i ? '' : list.length}</td>
+      <td class="num">${i ? '' : money(list.reduce((n, l) => n + l.value, 0))}</td>
+      <td class="num">${i ? '' : plainPct(total ? list.reduce((n, l) => n + l.value, 0) / total * 100 : null)}</td>
+      <td class="num">${i ? '' : ratio(yours)}</td>
+      <td class="num">${i ? '' : ratio(medianPe(list))}</td>
+      <td>${NSE_INDICES[id]}</td><td class="num">${ratio(theirs)}</td>
+      <td class="num">${gap == null ? '–' : `${Math.abs(gap).toFixed(1)}% ${gap >= 0 ? 'above' : 'below'}`}</td></tr>`;
+  }).join('');
+  return `<div class="holdings-wrap"><table class="holdings pf-summary">
+    <thead><tr><th>Market cap</th><th class="num">Stocks</th><th class="num">Market value</th><th class="num">Share</th><th class="num">Your P/E</th><th class="num">Middle stock's P/E</th><th>Index</th><th class="num">Index P/E</th><th class="num">You against index</th></tr></thead>
+    <tbody>${bands.map(([name, list]) => row(name, list, CAP_PE_INDICES[name] ?? ['nifty500'])).join('')}</tbody>
+    <tfoot>${row('All Indian stocks', merged, ['nifty500'])}</tfoot>
+  </table></div>`;
+}
+
+const annualVol = returns => {
+  if (returns.length < 6) return null;
+  const mean = returns.reduce((n, r) => n + r, 0) / returns.length;
+  return Math.sqrt(returns.reduce((n, r) => n + (r - mean) ** 2, 0) / (returns.length - 1) * 12) * 100;
+};
+
+// Monthly moves, open to close, of what was held at each month's start, so new
+// money doesn't look like volatility. The month in progress is left out.
+function volatilityTable(brokers, indian) {
+  if (!showMarketHistory()) {
+    return `<p class="muted small chart-note">This needs monthly prices for your holdings.</p>
+      ${dataMode() === 'backup' ? '' : `<button class="btn sm" id="r-load-history">${icon('download')}<span>Load monthly prices</span></button>`}`;
+  }
+  const keys = [];
+  const now = monthKey(new Date().toISOString());
+  for (let k = monthKey(new Date(Date.now() - 66 * 30.5 * 864e5).toISOString()); k < now; k = nextMonth(k)) keys.push(k);
+  const { values } = monthlyValues(brokers, keys, new Set(indian.map(l => `${l.account.id}:${l.symbol}`)));
+  const recent = (list, n) => list.slice(-n);
+  const yours = keys.map(k => values.get(k)).filter(v => v.open > 0).map(v => v.heldClose / v.open - 1);
+  const line = (label, returns, bold) => `<tr><th scope="row">${label}</th>${VOL_PERIODS.map(([n]) => {
+    const v = returns.length >= n * 0.9 ? annualVol(recent(returns, n)) : null;
+    return `<td class="num">${bold ? `<strong>${plainPct(v)}</strong>` : plainPct(v)}</td>`;
+  }).join('')}</tr>`;
+  const indexRow = id => {
+    const months = A.S.priceMonths.find(m => m.symbol === benchmarkKey(id))?.months ?? {};
+    return line(NSE_INDICES[id], keys.filter(k => months[k]).map(k => months[k][1] / months[k][0] - 1));
+  };
+  return `<div class="holdings-wrap"><table class="holdings pf-summary">
+    <thead><tr><th>Annualized volatility</th>${VOL_PERIODS.map(([, label]) => `<th class="num">${label}</th>`).join('')}</tr></thead>
+    <tbody>${line('Your Indian stocks', yours, true)}${VOL_INDICES.map(indexRow).join('')}</tbody>
+  </table></div>`;
+}
+
+// The index's P/E when each lot still held was bought, weighted by its cost like
+// the P/E of a portfolio: total cost over total earnings at those dates.
+function peAtPurchase(lots, id) {
+  const months = A.S.priceMonths.find(m => m.symbol === peKey(id))?.months ?? {};
+  const keys = Object.keys(months).sort();
+  let cost = 0, earnings = 0, total = 0;
+  for (const lot of lots) {
+    const paid = lot.qty * lot.price;
+    const key = lot.date.slice(0, 7);
+    const at = months[key] ?? months[keys.filter(k => k < key).at(-1)];
+    total += paid;
+    if (at?.[0] > 0) {
+      cost += paid;
+      earnings += paid / at[0];
+    }
+  }
+  return { pe: earnings ? cost / earnings : null, covered: total ? cost / total * 100 : 0 };
+}
+
+const lotsOf = list => list.flatMap(l => l.parts.flatMap(p => (computed(p.account).positions.get(p.symbol)?.lots ?? []).map(lot => ({ ...lot, symbol: p.symbol }))));
+
+// What was paid over the earnings bought, each lot at the EPS of the last financial
+// year ended before it. Lot prices and EPS are both in today's share units.
+function stockPeAtPurchase(lots) {
+  let cost = 0, earnings = 0, total = 0;
+  for (const lot of lots) {
+    const paid = lot.qty * lot.price;
+    const years = A.S.priceMonths.find(m => m.symbol === epsKey(lot.symbol))?.months ?? {};
+    const year = Object.keys(years).sort().filter(k => k < lot.date.slice(0, 7)).at(-1);
+    total += paid;
+    if (year) {
+      cost += paid;
+      earnings += lot.qty * years[year][0];
+    }
+  }
+  return { pe: earnings > 0 ? cost / earnings : null, loss: cost > 0 && earnings <= 0, covered: total ? cost / total * 100 : 0 };
+}
+
+const coveredNote = covered => (covered < 99 ? `<small>Covers ${covered.toFixed(0)}% of cost</small>` : '');
+
+function entryTable(bands, merged) {
+  const row = (label, list, indices) => indices.map((id, i) => {
+    const lots = lotsOf(list);
+    const { pe, covered } = peAtPurchase(lots, id);
+    const yours = stockPeAtPurchase(lots);
+    return `<tr><th scope="row">${i ? '' : label}</th>
+      <td class="num">${i ? '' : money(lots.reduce((n, l) => n + l.qty * l.price, 0))}</td>
+      <td class="num">${i ? '' : `${yours.loss ? 'Loss' : ratio(yours.pe)}${coveredNote(yours.covered)}`}</td>
+      <td class="num">${i ? '' : ratio(weightedPe(list))}</td>
+      <td>${NSE_INDICES[id]}</td>
+      <td class="num">${ratio(pe)}${pe ? coveredNote(covered) : ''}</td>
+      <td class="num">${ratio(indexFigures(id)?.pe)}</td></tr>`;
+  }).join('');
+  return `<div class="holdings-wrap"><table class="holdings pf-summary">
+    <thead><tr><th>Market cap</th><th class="num">Cost of holdings</th><th class="num">Your P/E when you bought</th><th class="num">Your P/E today</th><th>Index</th><th class="num">Index P/E when you bought</th><th class="num">Index P/E today</th></tr></thead>
+    <tbody>${bands.map(([name, list]) => row(name, list, CAP_PE_INDICES[name] ?? ['nifty500'])).join('')}</tbody>
+    <tfoot>${row('All Indian stocks', merged, ['nifty50', 'nifty500'])}</tfoot>
+  </table></div>`;
+}
+
+function entryStocks(merged) {
+  const rows = merged.map(l => {
+    const lots = lotsOf([l]);
+    const paid = lots.reduce((n, x) => n + x.qty * x.price, 0);
+    const first = lots.reduce((d, x) => (x.date < d ? x.date : d), '9999');
+    return { ...l, paid, first, entry: stockPeAtPurchase(lots) };
+  }).sort((a, b) => b.paid - a.paid);
+  return `<div class="holdings-wrap"><table class="holdings pf-summary">
+    <thead><tr><th>Ticker</th><th>Stock name</th><th class="num">Cost of holdings</th><th class="num">First bought</th><th class="num">P/E when you bought</th><th class="num">P/E today</th></tr></thead>
+    <tbody>${rows.map(l => `<tr>
+      <th scope="row"><a href="${accountPath(l.holders[0].id)}/h/${encodeURIComponent(l.symbol)}">${A.esc(l.symbol)}</a></th>
+      <td class="pf-name" title="${A.esc(l.name)}">${A.esc(l.name) || '–'}</td>
+      <td class="num">${money(l.paid)}</td>
+      <td class="num">${l.first === '9999' ? '–' : day(l.first)}</td>
+      <td class="num">${l.entry.loss ? 'Loss' : ratio(l.entry.pe)}${coveredNote(l.entry.covered)}</td>
+      <td class="num">${l.pe > 0 ? ratio(l.pe) : l.eps < 0 ? 'Loss' : '–'}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function metricsReport() {
+  peWanted = true;
+  const brokers = reportBrokers();
+  const filters = reportFilters(null);
+  const indian = brokers.flatMap(({ account, c }) => (isUsd(account) ? [] : c.lines.filter(l => l.group === 'Stocks' && perfType(account, l) === 'Indian stocks').map(l => ({ ...l, account }))));
+  const groups = heldByTicker(indian);
+  if (!groups.length) return `${filters}<div class="empty">${icon('chart')}<p>No Indian stocks for this selection.</p></div>`;
+  const merged = groups.map(list => ({ ...mergeLines(list), parts: list.map(x => x.line) }));
+  const bands = orderBands('cap', new Set(merged.map(l => bandOf('cap', l)))).map(b => [b, merged.filter(l => bandOf('cap', l) === b)]);
+  const yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  const scored = merged.map(l => {
+    const start = l.parts.flatMap(p => p.flows ?? []).reduce((d, f) => (f.date < d ? f.date : d), today);
+    const id = CAP_RETURN_INDEX[bandOf('cap', l)] ?? 'nifty500';
+    const theirs = start <= yearAgo ? benchmarkXirr(l.parts, id) : null;
+    return { ...l, start, id, theirs, alpha: l.xirr != null && theirs != null ? l.xirr - theirs : null };
+  });
+  const rated = scored.filter(l => l.alpha != null);
+  const winners = rated.filter(l => l.alpha > 0).sort((a, b) => b.alpha - a.alpha);
+  const yours = weightedPe(merged), asOf = indexFigures('nifty50')?.asOf;
+  // A P/E this low usually comes from a one-off gain, and it can sway a whole band.
+  const odd = merged.filter(l => l.pe > 0 && l.pe < 3);
+  const without = weightedPe(merged.filter(l => !odd.includes(l)));
+  const allLots = lotsOf(merged);
+  const entry = peAtPurchase(allLots, 'nifty50');
+  const yourEntry = stockPeAtPurchase(allLots);
+  return `${filters}
+    <div class="stats five">
+      ${stat(`Your P/E${info('metrics')}`, ratio(yours), `${A.plural(merged.length, 'stock')}, weighted by value`)}
+      ${stat('Your P/E when you bought', ratio(yourEntry.pe), yourEntry.pe ? 'Weighted by what you paid' : 'Press Refresh on the Overview')}
+      ${stat('Nifty 50 P/E', ratio(indexFigures('nifty50')?.pe), asOf ? `NSE, ${asOf}` : 'Not loaded yet')}
+      ${stat('Nifty 50 P/E when you bought', ratio(entry.pe), entry.pe ? 'Weighted by what you paid' : 'Not loaded yet')}
+      ${stat('Stocks with alpha', `${winners.length} of ${rated.length}`, 'Beat their index, held a year or more')}
+    </div>
+    <div class="status" id="pf-status">${statusLine()}</div>
+    <section class="panel"><h2>P/E by market cap${info('metrics')}</h2>
+      <p class="muted small chart-note">Your P/E is total value over total earnings for that band, so bigger holdings count for more and loss-makers lower the earnings. Index figures are from NSE's closing file${asOf ? ` of ${asOf}` : ''}.</p>
+      ${odd.length ? `<p class="muted small chart-note">${odd.map(l => `${A.esc(l.symbol)} (${ratio(l.pe)})`).join(', ')} ${odd.length === 1 ? 'has' : 'have'} a P/E under 3, usually from a one-off gain. Without ${odd.length === 1 ? 'it' : 'them'}, your overall P/E is ${ratio(without)}.</p>` : ''}
+      ${peTable(bands, merged)}
+    </section>
+    <section class="panel"><h2>P/E when you bought${info('metrics')}</h2>
+      <p class="muted small chart-note">For the shares you hold today. Your P/E is what you paid over those shares' earnings for the last financial year before each purchase. The index is at its P/E at the end of the month you bought, weighted by what you paid. A P/E lower today means prices fell or earnings grew faster.</p>
+      ${entryTable(bands, merged)}
+      <details class="pf-details"><summary>Stock by stock</summary>${entryStocks(merged)}</details>
+    </section>
+    <section class="panel"><h2>Volatility${info('metrics')}</h2>
+      <p class="muted small chart-note">How much monthly returns swing, as a yearly figure. Lower is steadier.</p>
+      ${volatilityTable(brokers, indian)}
+    </section>
+    <section class="panel"><h2>Stocks with alpha${info('metrics')}</h2>
+      <p class="muted small chart-note">Your XIRR on each stock less what the same money made in the index for its market cap. ${A.plural(merged.length - scored.filter(l => l.start <= yearAgo).length, 'stock')} held under a year left out, as short holdings annualize wildly.</p>
+      ${winners.length ? `<div class="holdings-wrap"><table class="holdings pf-summary">
+        <thead><tr><th>Ticker</th><th>Stock name</th><th>Market cap</th><th class="num">Held since</th><th class="num">Your XIRR</th><th>Index</th><th class="num">Index XIRR</th><th class="num">Alpha</th></tr></thead>
+        <tbody>${winners.map(l => `<tr>
+          <th scope="row"><a href="${accountPath(l.holders[0].id)}/h/${encodeURIComponent(l.symbol)}">${A.esc(l.symbol)}</a></th>
+          <td class="pf-name" title="${A.esc(l.name)}">${A.esc(l.name) || '–'}</td>
+          <td>${A.esc(bandOf('cap', l))}</td>
+          <td class="num">${day(l.start)}</td>
+          <td class="num ${tone(l.xirr)}">${pct(l.xirr)}</td>
+          <td>${NSE_INDICES[l.id]}</td>
+          <td class="num">${pct(l.theirs)}</td>
+          <td class="num ${tone(l.alpha)}">${pct(l.alpha)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : `<p class="muted small">No stocks beat their index yet${rated.length ? '' : ', or the index history hasn\'t loaded'}.</p>`}
+    </section>`;
+}
+
+/* ---------- ratings ---------- */
+
+// Colour runs from good to bad, and every icon sits beside its words.
+const levelClass = rating => {
+  const place = rating.step / (rating.count - 1);
+  return place === 0 ? 'best' : place <= 0.25 ? 'good' : place < 0.75 ? 'mid' : place < 1 ? 'poor' : 'worst';
+};
+
+const svgIcon = body => `<svg class="rt-icon" viewBox="0 0 34 18" aria-hidden="true">${body}</svg>`;
+const GROWTH_CURVES = {
+  Exponential: 'M2 16C16 16 24 12 32 2', Linear: 'M2 16L32 2', Flat: 'M2 9H32',
+  'Degrowth linear': 'M2 2L32 16', 'Degrowth exponential': 'M2 2C16 2 24 6 32 16',
+};
+
+const RATING_ICONS = {
+  // A rail from low to high, with a marker where the price sits.
+  momentum: r => {
+    const at = 3 + (r.rank - 1) * 7;
+    return svgIcon(`<line class="rt-rail" x1="3" x2="31" y1="9" y2="9"/>${[3, 10, 17, 24, 31].map(x => `<line class="rt-rail" x1="${x}" x2="${x}" y1="6" y2="12"/>`).join('')}<circle class="rt-fill" cx="${at}" cy="9" r="4.5"/>`);
+  },
+  // The shape of the growth itself.
+  growth: r => {
+    const path = GROWTH_CURVES[r.label];
+    const end = path.split(/[ LHCM]/).filter(Boolean).slice(-2).map(Number);
+    return svgIcon(`<path class="rt-line" d="${path}"/><circle class="rt-fill" cx="32" cy="${r.label === 'Flat' ? 9 : end[1]}" r="2"/>`);
+  },
+  // Three blocks, cheap to dear, with the matching one lit.
+  valuation: r => svgIcon([0, 1, 2].map(i => `<rect class="${i === r.step ? 'rt-fill' : 'rt-off'}" x="${1 + i * 11}" y="5" width="10" height="8" rx="2"/>`).join('')),
+  // Signal bars, or a flame when cash is going out.
+  profitability: r => (r.label === 'Burning cash'
+    ? svgIcon('<path class="rt-fill" d="M17 1C18 6 24 8 24 12.5A7 5 0 0 1 10 12.5C10 9.5 12 8.5 13 6C14 7.5 15 8 16 8C17 6 17 3.5 17 1Z"/>')
+    : svgIcon([0, 1, 2, 3].map(i => `<rect class="${i < 4 - r.step ? 'rt-fill' : 'rt-off'}" x="${3 + i * 7}" y="${13 - i * 4}" width="5" height="${4 + i * 4}" rx="1"/>`).join(''))),
+};
+
+const ratingChip = (scale, r) => (r
+  ? `<span class="rt rt-${levelClass(r)}" title="${A.esc(RATING_SCALES[scale].rule)}">${RATING_ICONS[scale](r)}<span class="rt-text"><b>${A.esc(r.label)}</b><small>${A.esc(r.note)}</small></span></span>`
+  : '<span class="muted small">Not rated</span>');
+
+const RATE_COLUMNS = [
+  ['symbol', 'Ticker'], ['value', 'Market value'], ['perf1w', '1W'], ['perf1m', '1M'], ['perf3m', '3M'], ['perf6m', '6M'], ['perf1y', '1Y'], ['perf5y', '5Y'],
+  ...Object.entries(RATING_SCALES).map(([k, s]) => [k, s.label]),
+];
+const rateSort = { key: 'value', dir: -1 };
+
+function ratingLegend(scale, list) {
+  const { label, levels, rule } = RATING_SCALES[scale];
+  return `<div class="rt-scale"><h3>${label}</h3>
+    ${levels.map((level, step) => {
+      const r = { label: level, note: '', rank: levels.length - step, step, count: levels.length };
+      return `<div class="rt-key rt-${levelClass(r)}">${RATING_ICONS[scale](r)}<span>${level}</span><b>${list.filter(l => l[scale]?.label === level).length}</b></div>`;
+    }).join('')}
+    <p class="muted small">${A.esc(rule)}</p>
+  </div>`;
+}
+
+function ratingReport() {
+  const brokers = reportBrokers();
+  const filters = reportFilters(null);
+  const indian = brokers.flatMap(({ account, c }) => (isUsd(account) ? [] : c.lines.filter(l => l.group === 'Stocks' && perfType(account, l) === 'Indian stocks').map(l => ({ ...l, account }))));
+  const sectors = A.S.market.find(m => m.symbol === SECTOR_PE_KEY)?.f ?? {};
+  const list = heldByTicker(indian).map(mergeLines).map(l => ({
+    ...l,
+    momentum: momentumRating(l), growth: growthRating(l), valuation: valuationRating(l, sectors[l.sector]), profitability: profitabilityRating(l),
+  }));
+  if (!list.length) return `${filters}<div class="empty">${icon('chart')}<p>No Indian stocks for this selection.</p></div>`;
+  const sortValue = (l, key) => (RATING_SCALES[key] ? l[key]?.rank ?? -1 : l[key] ?? -Infinity);
+  const rows = [...list].sort((a, b) => (rateSort.key === 'symbol' ? a.symbol.localeCompare(b.symbol) : sortValue(a, rateSort.key) - sortValue(b, rateSort.key)) * rateSort.dir);
+  const head = ([key, label]) => {
+    const on = rateSort.key === key;
+    return `<th${key === 'symbol' || RATING_SCALES[key] ? '' : ' class="num"'} aria-sort="${on ? (rateSort.dir > 0 ? 'ascending' : 'descending') : 'none'}"><span class="pf-th"><button data-sort="${key}" data-rate="${key}">${label}${on ? (rateSort.dir > 0 ? ' ▲' : ' ▼') : ''}</button></span></th>`;
+  };
+  const stale = !list.some(l => l.allHigh != null) || !Object.keys(sectors).length;
+  return `${filters}
+    <div class="period"><div class="status" id="pf-status">${statusLine()}</div><button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button></div>
+    ${stale ? `<p class="muted small chart-note">Press Refresh to load the figures behind these ratings.</p>` : ''}
+    <section class="panel"><h2>What the ratings mean${info('ratings')}</h2>
+      <div class="rt-scales">${Object.keys(RATING_SCALES).map(k => ratingLegend(k, list)).join('')}</div>
+    </section>
+    <section class="panel"><h2>Your Indian stocks (${list.length})</h2>
+      <p class="muted small chart-note">Returns are each stock's own price change, not your purchase. These are rules applied to public figures, not advice. Hover over a rating for its rule.</p>
+      <div class="holdings-wrap"><table class="holdings rt-table">
+        <thead><tr>${RATE_COLUMNS.map(head).join('')}</tr></thead>
+        <tbody>${rows.map(l => `<tr>
+          <th scope="row"><a href="${accountPath(l.holders[0].id)}/h/${encodeURIComponent(l.symbol)}" title="${A.esc(l.name)}">${A.esc(l.symbol)}</a></th>
+          <td class="num">${money(l.value)}</td>
+          ${['perf1w', 'perf1m', 'perf3m', 'perf6m', 'perf1y', 'perf5y'].map(k => `<td class="num ${tone(l[k])}">${pct(l[k])}</td>`).join('')}
+          ${Object.keys(RATING_SCALES).map(k => `<td>${ratingChip(k, l[k])}</td>`).join('')}
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </section>`;
 }
 
 function reportsView(r) {
   const tab = REPORTS[r.tab] ? r.tab : 'dividends';
-  const body = tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : tab === 'timeline' ? timelineReport() : tab === 'performance' ? performanceReport() : dividendReport();
+  const body = tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : tab === 'timeline' ? timelineReport() : tab === 'performance' ? performanceReport() : tab === 'metrics' ? metricsReport() : tab === 'rating' ? ratingReport() : dividendReport();
   A.view.innerHTML = `
     ${hero('Reports', REPORTS[tab], HOME)}
     <div class="seg tabs" role="group" aria-label="Report">
@@ -2089,6 +2597,7 @@ function reportsView(r) {
   // A long chart opens on the latest months.
   const bars = A.$('.months.long');
   if (bars) bars.scrollLeft = bars.scrollWidth;
+  if (tab === 'metrics') refreshPeHistory();
   const chart = A.$('#pf-growth');
   if (chart) {
     drawGrowth();
@@ -2098,6 +2607,21 @@ function reportsView(r) {
     drawChart(box);
     new ResizeObserver(() => drawChart(box)).observe(box);
   });
+  A.view.querySelectorAll('[data-rate]').forEach(b => b.addEventListener('click', () => {
+    const top = A.$('.scroll').scrollTop;
+    const key = b.dataset.rate;
+    rateSort.dir = rateSort.key === key ? -rateSort.dir : key === 'symbol' ? 1 : -1;
+    rateSort.key = key;
+    reportsView(r);
+    A.$('.scroll').scrollTop = top;
+  }));
+  A.$('#r-load-history')?.addEventListener('click', () => { A.ls.set('pfTimelineMarket', true); reportsView(r); refreshMonthly(); });
+  A.view.querySelectorAll('[data-top]').forEach(b => b.addEventListener('click', () => {
+    const top = A.$('.scroll').scrollTop;
+    A.ls.set('pfPerfTop', Number(b.dataset.top));
+    reportsView(r);
+    A.$('.scroll').scrollTop = top;
+  }));
   A.view.querySelectorAll('[data-range]').forEach(b => b.addEventListener('click', () => {
     A.ls.set('pfPerfRange', b.dataset.range);
     A.view.querySelectorAll('[data-range]').forEach(x => x.setAttribute('aria-pressed', x.dataset.range === b.dataset.range));
