@@ -7,7 +7,7 @@ import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } 
 import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
 import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote as cleanPortfolioNote } from './portfolio.js';
-import { initPortfolio, disclosureView, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTileText, portfolioChanged } from './portfolio-view.js';
+import { initPortfolio, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTileText, portfolioChanged } from './portfolio-view.js';
 
 const TRASH_DAYS = 30;
 const DAY = 24 * 60 * 60 * 1000;
@@ -40,6 +40,7 @@ const S = {
   earnContracts: [],
   transfers: [],
   brokerFees: [],
+  priceMonths: [],
   market: [],
   open: new Set(ls.get('open', [])),
   route: null,
@@ -361,6 +362,7 @@ function parseRoute(hash) {
     if (p[2] === 'reports') return { ...base, page: 'reports', tab: p[3] };
     if (p[2] === 'transfers') return { ...base, page: 'transfers' };
     if (p[2] === 'consolidated') return { ...base, page: 'consolidated' };
+    if (p[2] === 'data' || p[2] === 'disclosure') return { ...base, page: p[2] };
     if (p[2] !== 'a' || !p[3]) return null;
     if (p[4] === 'h') return { ...base, page: 'stock', id: p[3], symbol: p[5] };
     return { ...base, page: p[4] || 'account', id: p[3] };
@@ -374,7 +376,7 @@ function parseRoute(hash) {
   if (p[0] === 'note' && p[1]) return { name: 'note', id: p[1] };
   if (p[0] === 'trash') return { name: 'trash' };
   if (p[0] === 'settings') return { name: 'settings' };
-  if (p[0] === 'disclosure') return { name: 'disclosure' };
+  if (p[0] === 'disclosure') return { name: 'portfolio', section: 'portfolio', page: 'disclosure' };
   return null;
 }
 
@@ -449,7 +451,6 @@ function renderView() {
   else if (r.name === 'payments') paymentsView(r);
   else if (r.name === 'portfolio') portfolioView(r);
   else if (r.name === 'settings') settingsView();
-  else if (r.name === 'disclosure') disclosureView();
   else listView(r);
 }
 
@@ -514,10 +515,21 @@ function renderDrawer() {
 
   const payPage = ['add', 'edit', 'p'].includes(r.page) ? 'manage' : r.page;
   const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.app ? portfolioNav() : [];
-  const current = sec?.id === 'payments' ? payPage : ['reports', 'transfers', 'consolidated'].includes(r.page) ? r.page : r.id ?? 'home';
+  const current = sec?.id === 'payments' ? payPage : ['reports', 'transfers', 'consolidated', 'data', 'disclosure'].includes(r.page) ? r.page : r.id ?? 'home';
+  const pageLink = p => row(current === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${esc(p.name)}</span></a>`);
+  // Open by default, so the stored key means closed. A closed group marks the page inside it.
+  const pageGroup = p => {
+    const key = `nav:${p.id}`;
+    const open = !S.open.has(key);
+    return `${row(!open && p.children.some(c => c.id === current), `
+      <button class="label plain" data-toggle="${key}">${icon(p.icon)}<span>${esc(p.name)}</span></button>
+      <span class="count">${p.children.length}</span>
+      <button class="twisty" data-toggle="${key}" aria-expanded="${open}" aria-label="Show ${esc(p.name)}">${icon('chevron')}</button>`)}
+      ${open ? `<ul>${p.children.map(c => `<li>${pageLink(c)}</li>`).join('')}</ul>` : ''}`;
+  };
   const nav = sec?.app
     ? `<div class="section-label"><span>${esc(sec.name)}</span></div>
-      <ul class="tree">${pages.map(p => `<li>${row(current === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${esc(p.name)}</span></a>`)}</li>`).join('')}</ul>`
+      <ul class="tree">${pages.filter(p => !p.foot).map(p => `<li>${p.children ? pageGroup(p) : pageLink(p)}</li>`).join('')}</ul>`
     : sec
     ? `${row(r.name === 'section', `
         <a class="label" href="#/s/${sec.id}">${icon(sec.icon)}<span>${esc(sec.name)}</span></a>
@@ -533,8 +545,8 @@ function renderDrawer() {
       ${nav}
     </div>
     <div class="drawer-foot">
+      ${pages.filter(p => p.foot).map(pageLink).join('')}
       ${row(r.name === 'trash', `<a class="label" href="#/trash">${icon('trash')}<span>Trash</span></a><span class="count">${trashCount || ''}</span>`)}
-      ${row(r.name === 'disclosure', `<a class="label" href="#/disclosure">${icon('info')}<span>Data disclosure</span></a>`)}
       ${row(r.name === 'settings', `<a class="label" href="#/settings">${icon('settings')}<span>Settings &amp; backup</span></a>`)}
     </div>`;
 }
@@ -1265,7 +1277,7 @@ async function init() {
   initPayments(helpers);
   initPortfolio(helpers);
   try {
-    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'market'];
+    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'market', 'priceMonths'];
     (await Promise.all(stores.map(db.all))).forEach((rows, i) => { S[stores[i]] = rows; });
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;

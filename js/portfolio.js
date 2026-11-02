@@ -283,7 +283,7 @@ function cashFlows(p, value) {
 
 // The curated list plus Yahoo's splits. A curated entry wins over a Yahoo one
 // for the same event.
-function allActions(market) {
+export function allActions(market) {
   const yahoo = market.flatMap(m => (m.splits ?? []).map(s => ({ type: 'split', symbol: m.symbol, date: s.date, num: s.num, den: s.den, note: 'From Yahoo Finance' })));
   const same = (a, b) => a.symbol === b.symbol && a.date === b.date && a.num === b.num && a.den === b.den;
   const real = yahoo.filter(y => !NOT_SPLITS.some(n => n.symbol === y.symbol && n.date === y.date));

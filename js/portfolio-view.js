@@ -1,12 +1,13 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
-import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
+import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, allActions, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
-import { stockQuotes, usQuotes, usdInr, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
+import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, setOffline, EVENT_GAP_MS } from './market.js';
+import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, unzipFiles } from './public-data.js';
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { tickerFor, companyPart } from './tickers.js';
-import { SOURCES, DATA_POINTS } from './disclosures.js';
+import { SOURCES, DATA_POINTS, BACKUP_FILES, BACKUP_CONTENTS, BACKUP_LEAVES_OUT, BACKUP_NEEDS_NOTHING } from './disclosures.js';
 import { GROUPINGS, bandOf, orderBands } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
@@ -128,11 +129,14 @@ const ACTION_KINDS = new Set(['split', 'bonus', 'merger', 'rename', 'demerger', 
 const V = { sort: 'value', dir: -1, show: 'current', asset: 'all', q: '' };
 const pickedBrokers = new Set();
 let mergedPage = false;
-const job = { running: false, done: 0, total: 0, failed: 0 };
+const job = { running: false, done: 0, total: 0, failed: 0, what: '' };
 let firstVisit = true;
 
 let A;
-export function initPortfolio(helpers) { A = helpers; }
+export function initPortfolio(helpers) {
+  A = helpers;
+  setOffline(dataMode() === 'backup');
+}
 
 const cache = new Map();
 const building = new Set();
@@ -361,11 +365,13 @@ export const portfolioNav = () => [
   { id: 'consolidated', name: 'Consolidated', icon: 'list', href: `${HOME}/consolidated` },
   { id: 'reports', name: 'Reports', icon: 'file', href: `${HOME}/reports` },
   { id: 'transfers', name: 'Transfers', icon: 'swap', href: `${HOME}/transfers` },
-  ...accounts().map(a => ({ id: a.id, name: a.name, icon: a.kind === 'crypto' ? 'cloud' : a.kind === 'mf' ? 'chart' : 'card', href: accountPath(a.id) })),
+  ...(accounts().length ? [{ id: 'brokers', name: 'Brokers', icon: 'briefcase', children: accounts().map(a => ({ id: a.id, name: a.name, icon: a.kind === 'crypto' ? 'cloud' : a.kind === 'mf' ? 'chart' : 'card', href: accountPath(a.id) })) }] : []),
+  { id: 'data', name: 'Data sources', icon: 'settings', href: `${HOME}/data`, foot: true },
+  { id: 'disclosure', name: 'Data disclosure', icon: 'info', href: `${HOME}/disclosure`, foot: true },
 ];
 
 export function portfolioRouteValid(r) {
-  if (['home', 'add', 'reports', 'transfers', 'consolidated'].includes(r.page)) return true;
+  if (['home', 'add', 'reports', 'transfers', 'consolidated', 'data', 'disclosure'].includes(r.page)) return true;
   if (!accountById(r.id)) return false;
   if (r.page === 'stock') return !!computed(accountById(r.id)).positions.get(r.symbol);
   return ['account', 'reconcile', 'trade'].includes(r.page);
@@ -473,19 +479,34 @@ function eventSymbols() {
 }
 
 // The relay allows about 20 calls a minute, so a first load runs in the background.
+const dataMode = () => A.ls.get('pfDataSource', 'internet');
+const recentMonths = () => A.ls.get('pfDataRecent', 12);
+
+// Hybrid mode's first internet month. Earlier months come from the backup.
+function recentCutoff() {
+  if (dataMode() !== 'hybrid') return null;
+  const now = new Date();
+  const month = now.getFullYear() * 12 + now.getMonth() - recentMonths();
+  return `${Math.floor(month / 12)}-${String(month % 12 + 1).padStart(2, '0')}`;
+}
+
 async function refreshEvents() {
-  if (job.running) return;
+  if (job.running || dataMode() === 'backup') return;
   const list = eventSymbols();
-  if (!list.length) return;
-  Object.assign(job, { running: true, done: 0, total: list.length, failed: 0 });
+  if (!list.length) return refreshMonthly();
+  Object.assign(job, { running: true, done: 0, total: list.length, failed: 0, what: 'splits and dividends' });
   showStatus();
   for (const [symbol, from] of list) {
     const started = Date.now();
     try {
       // History starts well before the first trade, so nothing near it is missed.
       const us = symbol.startsWith(US_PREFIX);
-      const events = await stockEvents(us ? symbol.slice(US_PREFIX.length) : symbol, `${Number(from.slice(0, 4)) - 1}-01-01`, us);
-      await db.put('market', saveMarket(symbol, { ...(events ?? { splits: [], dividends: [] }), eventsAt: Date.now() }));
+      const rec = A.S.market.find(m => m.symbol === symbol);
+      const cut = recentCutoff();
+      const since = cut && rec?.eventsAt ? `${cut}-01` : null;
+      const events = await stockEvents(us ? symbol.slice(US_PREFIX.length) : symbol, since ?? `${Number(from.slice(0, 4)) - 1}-01-01`, us);
+      const older = list => (since ? (list ?? []).filter(x => x.date < since) : []);
+      await db.put('market', saveMarket(symbol, { splits: [...older(rec?.splits), ...(events?.splits ?? [])], dividends: [...older(rec?.dividends), ...(events?.dividends ?? [])], eventsAt: Date.now() }));
     } catch {
       job.failed++;
     }
@@ -496,9 +517,78 @@ async function refreshEvents() {
   }
   job.running = false;
   redraw();
+  refreshMonthly();
+}
+
+const showMarketHistory = () => A.ls.get('pfTimelineMarket', false);
+
+const BENCHMARKS = {
+  nifty50: ['Nifty 50', '^NSEI'],
+  next50: ['Nifty Next 50', '^NSMIDCP'],
+  mid150: ['Nifty Midcap 150', 'NIFTYMIDCAP150.NS'],
+  nasdaq100: ['Nasdaq 100', '^NDX'],
+  sp500: ['S&P 500', '^GSPC'],
+};
+const benchmarkKey = id => `IX:${id}`;
+
+// The indices, then everything ever held that has a price series, biggest first,
+// as a first load takes minutes. Holdings only load for the Past market value switch.
+function monthlySymbols() {
+  const t = Date.now();
+  const all = new Map(Object.entries(BENCHMARKS).map(([id, [, ticker]]) => [benchmarkKey(id), { key: benchmarkKey(id), symbol: ticker, kind: 'index', from: '2017-01-01', cost: Infinity }]));
+  for (const a of showMarketHistory() ? accounts() : []) {
+    const c = computed(a);
+    for (const line of c.lines) {
+      const p = c.positions.get(line.symbol);
+      const key = marketPrefix(a) + line.symbol;
+      const code = line.mutualFund ? A.S.market.find(m => m.symbol === line.symbol)?.schemeCode : null;
+      if (line.mutualFund ? !code : !isTicker(line.symbol.replace('.', '')) || line.symbol.endsWith('-RE')) continue;
+      const from = p.events.reduce((d, e) => (e.date < d ? e.date : d), '9999');
+      const kind = line.mutualFund ? 'fund' : a.kind === 'crypto' ? 'crypto' : isUsd(a) ? 'us' : 'stock';
+      const known = all.get(key);
+      all.set(key, { key, symbol: line.symbol, kind, code, from: known && known.from < from ? known.from : from, cost: (known?.cost ?? 0) + line.cost + line.soldCost });
+    }
+  }
+  return [...all.values()]
+    .filter(x => t - (A.S.priceMonths.find(m => m.symbol === x.key)?.at ?? 0) > EVENTS_MAX_AGE)
+    .sort((a, b) => b.cost - a.cost);
+}
+
+async function refreshMonthly() {
+  if (job.running || dataMode() === 'backup') return;
+  const list = monthlySymbols();
+  if (!list.length) return;
+  Object.assign(job, { running: true, done: 0, total: list.length, failed: 0, what: 'monthly prices' });
+  showStatus();
+  for (const x of list) {
+    const started = Date.now();
+    try {
+      // Hybrid fetches from the cutoff, or from the backup's last month if that's older.
+      const known = A.S.priceMonths.find(m => m.symbol === x.key)?.months ?? {};
+      const keys = Object.keys(known).sort();
+      const cut = recentCutoff();
+      const since = cut && keys[0] < cut ? (keys.at(-1) < cut ? keys.at(-1) : cut) : null;
+      const fresh = x.kind === 'fund' ? await fundMonths(x.code) : await monthlyPrices(x.symbol, since ? `${since}-01` : `${Number(x.from.slice(0, 4)) - 1}-01-01`, x.kind);
+      const rec = { symbol: x.key, months: since ? mergeMonths(known, fresh ?? {}, since) : fresh ?? {}, at: Date.now() };
+      A.S.priceMonths = [...A.S.priceMonths.filter(m => m.symbol !== x.key), rec];
+      await db.put('priceMonths', rec);
+    } catch {
+      job.failed++;
+    }
+    job.done++;
+    if (job.done % 10 === 0) redraw();
+    else showStatus();
+    if (x.kind !== 'fund') await new Promise(r => setTimeout(r, Math.max(0, EVENT_GAP_MS - (Date.now() - started))));
+  }
+  job.running = false;
+  redraw();
 }
 
 async function refreshMarket(manual) {
+  if (dataMode() === 'backup') {
+    if (manual) A.toast('Public data is set to local backup, so nothing was downloaded');
+    return;
+  }
   const btn = A.$('[data-act=pf-refresh]');
   if (btn) btn.disabled = true;
   try {
@@ -514,9 +604,10 @@ async function refreshMarket(manual) {
 
 function statusLine() {
   const at = A.ls.get('pfQuotedAt', 0);
+  if (dataMode() === 'backup') return `${icon('file')}<span>Using your local backup, not the internet. ${at ? `Prices as of ${A.relDate(at)}.` : 'No prices loaded yet.'}</span>`;
   const quoted = at ? `Prices updated ${A.relDate(at)}, delayed.` : 'Prices not loaded yet.';
-  if (job.running) return `${icon('clock')}<span>${quoted} Loading splits and dividends: ${job.done} of ${job.total}. Figures update as they arrive.</span>`;
-  if (job.failed) return `${icon('alert')}<span>${quoted} ${A.plural(job.failed, 'stock')} could not load splits or dividends; refresh to retry.</span>`;
+  if (job.running) return `${icon('clock')}<span>${quoted} Loading ${job.what}: ${job.done} of ${job.total}. Figures update as they arrive.</span>`;
+  if (job.failed) return `${icon('alert')}<span>${quoted} ${A.plural(job.failed, 'holding')} could not load ${job.what}; refresh to retry.</span>`;
   return `${icon('clock')}<span>${quoted}</span>`;
 }
 
@@ -743,7 +834,10 @@ function addView() {
 // Holdings first: their prices pin down the ticker, and a tradebook then uses
 // the same symbol for the same company.
 async function resolveNames(parsed) {
-  const list = await listedSecurities();
+  // Without the exchange lists, the tickers already in local data have to do.
+  const list = dataMode() === 'backup'
+    ? A.S.market.filter(m => m.name && !m.symbol.includes(':')).map(m => ({ symbol: m.symbol, name: m.name, isin: '', close: m.price ?? 0 }))
+    : await listedSecurities();
   for (const p of parsed.filter(x => x.named && x.holdings)) {
     p.holdings = p.holdings.map(h => {
       const t = tickerFor(h.symbol, list, h.close);
@@ -1082,14 +1176,14 @@ async function chooseColumns() {
 function showSource(id) {
   const point = DATA_POINTS.find(d => d.id === id);
   const names = [...new Set(point.sources.map(s => SOURCES[s].name))].join(', ');
-  A.toast(`Source: ${names}`, { label: 'Disclosure', fn: () => A.go('#/disclosure') });
+  A.toast(`Source: ${names}`, { label: 'Disclosure', fn: () => A.go(`${HOME}/disclosure`) });
 }
 
-export function disclosureView() {
+function disclosureView() {
   const used = Object.entries(SOURCES);
   const rules = Object.values(GROUPINGS).filter(g => g.rule);
   A.view.innerHTML = `
-    <header class="topbar">${A.upButton('#/')}<div class="titles"><h1>Data disclosure</h1><p>Where every outside figure comes from</p></div>${A.menuButton}</header>
+    <header class="topbar">${A.upButton(HOME)}<div class="titles"><h1>Data disclosure</h1><p>Where every outside figure comes from</p></div>${A.menuButton}</header>
     <div class="scroll"><div class="pay-page pf-page">
       <p class="muted">Figures are for your own tracking, not investment advice. Free sources can be late, wrong or stop working, so check anything important against your broker. Only ticker symbols and fund or coin names are sent to these sources, never your quantities or amounts.</p>
       <section class="panel"><h2>Data sources (${used.length})</h2><div class="holdings-wrap"><table class="holdings lots pf-disclosure">
@@ -1111,13 +1205,17 @@ export function disclosureView() {
 /* ---------- reports ---------- */
 
 const R = { broker: 'all', year: 'all' };
-const REPORTS = { dividends: 'Dividends', gains: 'Capital gains', earn: 'Crypto earnings', fees: 'Fees' };
+const REPORTS = { timeline: 'Timeline', performance: 'Performance', dividends: 'Dividends', gains: 'Capital gains', earn: 'Crypto earnings', fees: 'Fees' };
 
 // Indian financial years run April to March, named by the year they start.
 const fyStart = date => Number(date.slice(0, 4)) - (date.slice(5, 7) < '04' ? 1 : 0);
 const fyName = y => `FY${y}-${String(y + 1).slice(2)}`;
 const monthKey = date => date.slice(0, 7);
 const monthText = (key, opts) => A.fmt(new Date(`${key}-01T00:00:00`), opts);
+const nextMonth = key => {
+  const [y, m] = key.split('-').map(Number);
+  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+};
 
 // Each broker's positions, with a rate to bring its money into what's on screen.
 function reportBrokers() {
@@ -1126,15 +1224,16 @@ function reportBrokers() {
   return list.map(a => ({ account: a, c: computed(a), rate: shown === CONFIG.currency && isUsd(a) ? fxRate() ?? 0 : 1 }));
 }
 
+// With no years, the report covers all time and has no year or detail choices.
 function reportFilters(years, extra = '') {
-  const year = years.includes(Number(R.year)) ? R.year : 'all';
+  const year = years?.includes(Number(R.year)) ? R.year : 'all';
   R.year = year;
   return `<div class="pf-sort pf-filters">
     <label for="r-broker">Broker</label>
     <select class="select" id="r-broker"><option value="all">All brokers</option>${accounts().map(a => `<option value="${a.id}"${a.id === R.broker ? ' selected' : ''}>${A.esc(a.name)}</option>`).join('')}</select>
-    <label for="r-year">Year</label>
-    <select class="select" id="r-year"><option value="all">All years</option>${years.map(y => `<option value="${y}"${String(y) === String(year) ? ' selected' : ''}>${fyName(y)}</option>`).join('')}</select>
-    <span class="pf-checks">${extra}<label class="switch pf-detail"><input type="checkbox" id="r-detail"${detailed() ? ' checked' : ''}><span>Detailed report</span></label></span>
+    ${years ? `<label for="r-year">Year</label>
+    <select class="select" id="r-year"><option value="all">All years</option>${years.map(y => `<option value="${y}"${String(y) === String(year) ? ' selected' : ''}>${fyName(y)}</option>`).join('')}</select>` : ''}
+    <span class="pf-checks">${extra}${years ? `<label class="switch pf-detail"><input type="checkbox" id="r-detail"${detailed() ? ' checked' : ''}><span>Detailed report</span></label>` : ''}</span>
   </div>`;
 }
 
@@ -1150,11 +1249,7 @@ function monthBars(amounts) {
     const known = [...amounts.keys()].sort();
     if (!known.length) return '';
     keys = [];
-    for (let k = known[0]; k <= known.at(-1);) {
-      keys.push(k);
-      const [y, m] = k.split('-').map(Number);
-      k = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
-    }
+    for (let k = known[0]; k <= known.at(-1); k = nextMonth(k)) keys.push(k);
   } else {
     const y = Number(R.year);
     keys = Array.from({ length: 12 }, (_, i) => `${i < 9 ? y : y + 1}-${String((i + 3) % 12 + 1).padStart(2, '0')}`);
@@ -1474,9 +1569,517 @@ async function linkTransfer(tradeId) {
   refreshMarket();
 }
 
+/* ---------- timeline ---------- */
+
+const CLASS_NOUN = { Stocks: 'stock', ETFs: 'ETF', Commodities: 'commodity holding', Debt: 'debt holding', 'Mutual funds': 'mutual fund', Crypto: 'crypto holding' };
+const ACTION_EVENTS = new Set(['split', 'bonus', 'merger', 'demerger']);
+const MILESTONES = { [CONFIG.currency]: [1e5, 5e5, 1e6, 2.5e6, 5e6, 1e7, 2.5e7, 5e7, 1e8], USD: [1e3, 1e4, 5e4, 1e5, 5e5, 1e6] };
+
+const compact = v => (isPrivate() ? MASK : new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: shown, notation: 'compact', maximumFractionDigits: 1 }).format(v));
+let growth = null;
+
+// The money moved each year, and the running cost of what was held, from every position.
+function timelineLedger(brokers) {
+  const ledger = [];
+  const years = new Map();
+  const year = date => {
+    const y = fyStart(date);
+    if (!years.has(y)) years.set(y, { y, added: 0, sold: 0, gain: 0, dividends: 0, end: 0 });
+    return years.get(y);
+  };
+  const buys = [], sales = [], paid = [], actions = [], firsts = new Map();
+  for (const { c, rate } of brokers) {
+    for (const p of c.positions.values()) {
+      const bought = [...p.lots.map(l => [l.date, l.qty * l.price * rate]), ...p.realized.map(s => [s.buyDate, s.qty * s.cost * rate])];
+      bought.forEach(([date, cost]) => { ledger.push({ date, change: cost }); year(date).added += cost; });
+      for (const s of p.realized) {
+        ledger.push({ date: s.sellDate, change: -s.qty * s.cost * rate });
+        year(s.sellDate).sold += s.qty * s.price * rate;
+        year(s.sellDate).gain += s.qty * (s.price - s.cost) * rate;
+      }
+      for (const d of p.dividendEvents) {
+        year(d.date).dividends += d.amount * rate;
+        paid.push({ date: d.date, symbol: p.symbol, amount: d.amount * rate });
+      }
+      for (const e of p.events) {
+        if (e.kind === 'buy') buys.push({ date: e.date, symbol: p.symbol, amount: e.qty * e.price * rate });
+        else if (e.kind === 'sell') sales.push({ date: e.date, symbol: p.symbol, amount: e.qty * e.price * rate, gain: (e.gain ?? 0) * rate });
+        else if (ACTION_EVENTS.has(e.kind)) actions.push({ date: e.date, symbol: p.symbol, kind: e.kind, ratio: e.ratio });
+      }
+      const group = c.lines.find(l => l.symbol === p.symbol)?.group;
+      const start = bought.map(b => b[0]).sort()[0];
+      if (group && start && !(firsts.get(group)?.date <= start)) firsts.set(group, { date: start, symbol: p.symbol, group });
+    }
+  }
+  ledger.sort((a, b) => a.date.localeCompare(b.date));
+  return { ledger, years, year, buys, sales, paid, actions, firsts };
+}
+
+// Estimated value at each month's open and close. Yahoo's prices are in today's
+// share units, as open lots are, while a sold lot stays in the units of its sale
+// and so is scaled up by later splits. A holding with no price for a month is
+// taken as moving steadily from its cost to today's price, so it doesn't jump
+// at the end. One sold counts at cost, as nothing says what it was worth.
+function monthlyValues(brokers, months, only) {
+  const values = new Map(months.map(k => [k, { open: 0, close: 0, heldClose: 0 }]));
+  const records = new Map(A.S.priceMonths.map(m => [m.symbol, m.months]));
+  let priced = 0, total = 0;
+  for (const { account, c, rate } of brokers) {
+    const actions = allActions(marketFor(account)).filter(a => a.type === 'split' || a.type === 'bonus');
+    for (const p of c.positions.values()) {
+      const prices = records.get(marketPrefix(account) + p.symbol) ?? {};
+      if ((!p.lots.length && !p.realized.length) || (only && !only.has(`${account.id}:${p.symbol}`))) continue;
+      total++;
+      if (Object.keys(prices).length) priced++;
+      const later = date => actions.filter(a => a.symbol === p.symbol && a.date > date).reduce((n, a) => n * a.num / a.den, 1);
+      const lots = [
+        ...p.lots.map(l => ({ from: l.date, to: '9999', qty: l.qty, cost: l.qty * l.price })),
+        ...p.realized.map(s => ({ from: s.buyDate, to: s.sellDate, qty: s.qty * later(s.sellDate), cost: s.qty * s.cost })),
+      ];
+      const latest = c.lines.find(l => l.symbol === p.symbol)?.price;
+      for (const lot of lots) {
+        const bought = Date.parse(lot.from);
+        const guess = date => {
+          if (lot.to !== '9999' || latest == null) return lot.cost;
+          const part = (Date.parse(date) - bought) / ((Date.now() - bought) || 1);
+          return lot.cost + (lot.qty * latest - lot.cost) * Math.min(Math.max(part, 0), 1);
+        };
+        for (const k of months) {
+          const row = values.get(k), first = `${k}-01`, last = `${k}-31`;
+          const [open, close] = prices[k] ?? [];
+          const atClose = (close == null ? guess(`${k}-28`) : lot.qty * close) * rate;
+          // Lots held from the start show what the market did, apart from new money.
+          if (lot.from < first && lot.to >= first) {
+            row.open += (open == null ? guess(first) : lot.qty * open) * rate;
+            row.heldClose += atClose;
+          }
+          if (lot.from <= last && lot.to > last) row.close += atClose;
+        }
+      }
+    }
+  }
+  return { values, priced, total };
+}
+
+// Everything worth a card. Keyed so one event shows once, with its biggest claim.
+function timelineHighlights(brokers, data) {
+  const marks = new Map();
+  const add = (key, h) => { if (!marks.has(key)) marks.set(key, h); };
+  const record = (key, major, h) => add(key, { ...h, major });
+  const best = (list, score) => list.reduce((a, b) => (score(b) > score(a) ? b : a), list[0]);
+  const ofYear = list => Object.values(Object.groupBy(list, x => fyStart(x.date)));
+  const buyCard = (b, title, major) => record(`buy:${b.date}:${b.symbol}`, major, { date: b.date, kind: 'buy', title, detail: `Bought ${b.symbol}`, amount: money(b.amount) });
+  const saleCard = (s, title, major) => record(`sale:${s.date}:${s.symbol}`, major, { date: s.date, kind: 'sale', title, detail: `Sold ${s.symbol} for ${money(s.amount)}`, amount: money(s.gain, true), cls: tone(s.gain) });
+  const payCard = (d, title, major) => record(`paid:${d.date}:${d.symbol}`, major, { date: d.date, kind: 'paid', title, detail: `From ${d.symbol}`, amount: money(d.amount) });
+
+  for (const f of data.firsts.values()) record(`first:${f.group}`, true, { date: f.date, kind: 'first', title: `First ${CLASS_NOUN[f.group]}`, detail: f.symbol });
+  for (const { account } of brokers) {
+    const start = A.S.trades.filter(t => t.accountId === account.id).map(t => t.date).sort()[0];
+    if (start) record(`broker:${account.id}`, true, { date: start, kind: 'broker', title: `Started with ${account.name}`, detail: KINDS[account.kind] });
+  }
+  const ids = new Set(brokers.map(b => b.account.id));
+  for (const x of A.S.transfers.filter(y => ids.has(y.fromAccountId) || ids.has(y.toAccountId))) {
+    record(`transfer:${x.id}`, true, { date: x.date, kind: 'transfer', title: `Moved ${x.coin} to ${accountById(x.toAccountId)?.name ?? 'another account'}`, detail: `From ${accountById(x.fromAccountId)?.name ?? 'another account'}`, amount: isPrivate() ? MASK : `${qtyText(x.received)} ${x.coin}` });
+  }
+
+  let running = 0;
+  const steps = [...MILESTONES[shown]];
+  for (const { date, change } of data.ledger) {
+    running += change;
+    data.year(date).end = running;
+    while (steps.length && running >= steps[0]) {
+      const step = steps.shift();
+      record(`mile:${step}`, true, { date, kind: 'mile', title: `Invested passed ${compact(step)}`, detail: 'Cost of what you held' });
+    }
+  }
+
+  if (data.buys.length) buyCard(best(data.buys, b => b.amount), 'Largest purchase', true);
+  if (data.sales.length) {
+    saleCard(best(data.sales, s => s.gain), 'Best sale', true);
+    saleCard(best(data.sales, s => -s.gain), 'Toughest sale', true);
+  }
+  if (data.paid.length) {
+    payCard(best(data.paid, d => -new Date(d.date)), 'First dividend', true);
+    payCard(best(data.paid, d => d.amount), 'Largest dividend', true);
+  }
+  // The rest of the record, a year at a time, for the detailed report.
+  ofYear(data.buys).forEach(list => buyCard(best(list, b => b.amount), 'Year\'s largest purchase', false));
+  ofYear(data.sales).forEach(list => saleCard(best(list, s => s.gain), 'Year\'s best sale', false));
+  ofYear(data.paid).forEach(list => payCard(best(list, d => d.amount), 'Year\'s largest dividend', false));
+  // A merger shows on both companies, and a stock held at two brokers shows twice.
+  for (const list of Object.values(Object.groupBy(data.actions, a => `${a.date}:${a.kind}:${a.ratio}`))) {
+    const [a] = list;
+    add(`act:${a.date}:${a.kind}:${a.ratio}`, { date: a.date, kind: 'action', title: `${EVENT_LABEL[a.kind]}: ${[...new Set(list.map(x => x.symbol))].join(', ')}`, detail: a.ratio ?? '', major: false });
+  }
+  return [...marks.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+const TIMELINE_ICON = { first: 'pie', broker: 'briefcase', transfer: 'swap', mile: 'chart', buy: 'plus', sale: 'check', paid: 'calendar', action: 'restore', today: 'clock' };
+
+function timelineCard(h) {
+  return `<li class="tl-item${h.major ? ' major' : ''}">
+    <span class="tl-dot">${icon(TIMELINE_ICON[h.kind])}</span>
+    <div class="tl-card">
+      <time datetime="${h.date}">${day(h.date)}</time>
+      <strong>${A.esc(h.title)}</strong>
+      ${h.detail ? `<span class="tl-detail">${A.esc(h.detail)}</span>` : ''}
+      ${h.amount ? `<span class="tl-amount ${h.cls ?? ''}">${h.amount}</span>` : ''}
+    </div>
+  </li>`;
+}
+
+function timelineReport() {
+  const brokers = reportBrokers();
+  const data = timelineLedger(brokers);
+  const marks = timelineHighlights(brokers, data);
+  const list = [...data.years.keys()].sort((a, b) => b - a);
+  const history = showMarketHistory();
+  const filters = reportFilters(list, `<label class="switch pf-detail"><input type="checkbox" id="r-market"${history ? ' checked' : ''}><span>Past market value</span></label>`);
+  growth = null;
+  if (!data.ledger.length) return `${filters}<div class="empty">${icon('chart')}<p>No trades for this selection.</p></div>`;
+
+  const rows = brokers.flatMap(({ c, rate }) => (rate === 1 ? c.lines : c.lines.map(l => inRupees(l, rate))));
+  const s = summarizeAll(rows);
+  const held = rows.filter(l => l.qty > EPS && l.value != null);
+  const largest = held.reduce((a, b) => (!a || b.value > a.value ? b : a), null);
+  const gainer = held.reduce((a, b) => (!a || (b.gain ?? 0) > (a.gain ?? 0) ? b : a), null);
+  const today = new Date().toISOString().slice(0, 10);
+  const first = data.ledger[0].date;
+  const banked = s.realized + s.dividends;
+  const span = (Date.now() - new Date(first)) / (365.25 * 864e5);
+
+  // Month by month from the ledger, carrying the last figure through quiet months.
+  const keys = [];
+  for (let k = monthKey(first); k <= monthKey(today); k = nextMonth(k)) keys.push(k);
+  const priced = history ? monthlyValues(brokers, keys) : null;
+  const closeOf = k => (k >= keys.at(-1) ? s.value : priced.values.get(k).close);
+  if (priced) {
+    data.years.forEach(r => { r.value = closeOf(`${r.y + 1}-03`); });
+    const past = keys.slice(0, -1);
+    const peak = past.reduce((a, b) => (closeOf(b) > closeOf(a) ? b : a), past[0]);
+    // Early months hold so little that one stock would decide these.
+    const moves = past.map(k => ({ k, ...priced.values.get(k) })).filter(m => m.open >= closeOf(peak) * 0.02).map(m => ({ k: m.k, pct: (m.heldClose / m.open - 1) * 100 }));
+    const card = (k, title, detail, amount, cls) => marks.push({ date: `${k}-28`, kind: 'mile', major: true, title, detail, amount, cls });
+    if (peak) card(peak, 'Highest month-end value', 'Estimated from month-end prices', money(closeOf(peak)));
+    if (moves.length) {
+      const up = moves.reduce((a, b) => (b.pct > a.pct ? b : a));
+      const down = moves.reduce((a, b) => (b.pct < a.pct ? b : a));
+      card(up.k, 'Best month', 'Holdings from open to close', pct(up.pct), tone(up.pct));
+      card(down.k, 'Toughest month', 'Holdings from open to close', pct(down.pct), tone(down.pct));
+    }
+  }
+  const points = [];
+  let at = 0, running = 0;
+  for (const k of keys) {
+    while (at < data.ledger.length && monthKey(data.ledger[at].date) === k) running += data.ledger[at++].change;
+    const notes = marks.filter(h => h.major && monthKey(h.date) === k).map(h => h.title);
+    const open = priced?.values.get(k).open;
+    points.push({ date: `${k}-15`, label: monthText(k, { month: 'short', year: 'numeric' }), value: running, text: money(running), notes, ...(priced && { market: closeOf(k), marketText: money(closeOf(k)), openText: money(open) }) });
+  }
+  growth = { points, value: s.value, valueText: money(s.value), market: !!priced };
+
+  const nowCard = { date: today, kind: 'today', major: true, title: 'Today', detail: [largest && `Largest holding ${largest.symbol}`, gainer && `Biggest gain ${gainer.symbol}`, `XIRR ${pct(s.xirr)}`].filter(Boolean).join(' · '), amount: money(s.value) };
+  const cards = [...marks.filter(h => detailed() || h.major), nowCard].filter(h => inYear(h.date)).sort((a, b) => b.date.localeCompare(a.date));
+  const groups = Object.entries(Object.groupBy(cards, h => fyStart(h.date))).sort(([a], [b]) => b - a);
+  const chartNote = priced
+    ? `Market value is an estimate from monthly closes, with ${priced.priced} of ${A.plural(priced.total, 'holding')} priced${job.running ? ' so far' : ''}. The rest are estimated between their cost and today's price.`
+    : 'The cost of what you held each month. Only the last point is a market value, unless Past market value is on.';
+  return `${filters}
+    <div class="stats five">
+      ${stat(`Value today${info('timeline')}`, money(s.value), s.unpriced ? `${s.unpriced} unpriced left out` : `${pct(s.gainPct)} on cost`)}
+      ${stat(`Invested now${info('timeline')}`, money(s.cost), `Since ${day(first)}, ${span.toFixed(1)} years`)}
+      ${stat('Gains banked', money(banked, true), 'Realized gains and dividends', tone(banked))}
+      ${stat(`XIRR${info('xirr')}`, pct(s.xirr), 'Annual return', tone(s.xirr))}
+    </div>
+    <section class="panel">
+      <h2>${priced ? 'Portfolio growth' : 'Money invested over time'}${info('timeline')}</h2>
+      <p class="muted small chart-note">${chartNote}</p>
+      ${priced ? `<div class="status" id="pf-status">${statusLine()}</div>
+      <div class="g-legend"><span><i class="g-key market"></i>Market value</span><span><i class="g-key invested"></i>Invested</span></div>` : ''}
+      <div class="pf-growth" id="pf-growth" role="img" aria-label="Line chart of money invested each month, ending at today's market value. The table below has the figures."></div>
+    </section>
+    <details class="panel pf-details"${detailed() ? ' open' : ''}>
+      <summary>Year by year</summary>
+      <div class="holdings-wrap"><table class="holdings lots">
+        <thead><tr><th>Year</th><th class="num">Added</th><th class="num">Sold for</th><th class="num">Realized gain</th><th class="num">Dividends</th><th class="num">Invested at year end</th>${priced ? '<th class="num">Market value at year end</th>' : ''}</tr></thead>
+        <tbody>${list.map(y => { const r = data.years.get(y); return `<tr><th scope="row">${fyName(y)}</th><td class="num">${money(r.added)}</td><td class="num">${money(r.sold)}</td><td class="num ${tone(r.gain)}">${money(r.gain, true)}</td><td class="num">${money(r.dividends)}</td><td class="num">${money(r.end)}</td>${priced ? `<td class="num">${money(r.value)}</td>` : ''}</tr>`; }).join('')}</tbody>
+      </table></div>
+    </details>
+    <section class="pf-timeline" aria-label="Investment highlights">
+      ${groups.map(([y, items]) => {
+        const r = data.years.get(Number(y));
+        return `<div class="tl-year"><h2>${fyName(Number(y))}</h2>${r ? `<p>Added ${money(r.added)} · Dividends ${money(r.dividends)} · Invested at year end ${money(r.end)}${priced ? ` · Market value ${money(r.value)}` : ''}</p>` : ''}</div>
+          <ol class="tl-list">${items.map(timelineCard).join('')}</ol>`;
+      }).join('')}
+    </section>`;
+}
+
+// Drawn to the panel's real width, so the text stays the same size on a phone.
+function drawGrowth() {
+  const box = A.$('#pf-growth');
+  if (!box || !growth) return;
+  const { points, value, market } = growth;
+  const w = box.clientWidth;
+  const narrow = w < 560;
+  const h = narrow ? 230 : 300;
+  const m = { l: 56, r: narrow ? 16 : 118, t: 26, b: 26 };
+  const time = s => new Date(`${s}T00:00:00`).getTime();
+  const start = time(points[0].date);
+  const x = s => m.l + (time(s) - start) / ((time(points.at(-1).date) - start) || 1) * (w - m.l - m.r);
+  const peak = Math.max(value, ...points.map(p => Math.max(p.value, p.market ?? 0))) || 1;
+  const unit = 10 ** Math.floor(Math.log10(peak));
+  const top = Math.ceil(peak / unit * 2) / 2 * unit;
+  const y = v => m.t + (1 - v / top) * (h - m.t - m.b);
+  const ticks = [0, 1, 2, 3, 4].map(i => top * i / 4);
+  const years = [...new Set(points.map(p => p.date.slice(0, 4)))];
+  const every = Math.ceil(years.length / (narrow ? 4 : 9));
+  const pathOf = key => points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)} ${y(p[key]).toFixed(1)}`).join('');
+  const path = pathOf('value');
+  const last = points.at(-1);
+  const endX = x(last.date);
+  const apart = Math.abs(y(value) - y(last.value)) > 34;
+  const side = narrow ? `text-anchor="end" x="${endX - 8}"` : `x="${endX + 10}"`;
+  box.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    ${ticks.map(t => `<line class="g-grid" x1="${m.l}" x2="${w - m.r}" y1="${y(t)}" y2="${y(t)}"/><text class="g-axis" x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${compact(t)}</text>`).join('')}
+    ${years.filter((_, i) => i % every === 0).map(d => `<text class="g-axis" x="${x(`${d}-01-01`) < m.l ? m.l : x(`${d}-01-01`)}" y="${h - 8}" text-anchor="middle">${d}</text>`).join('')}
+    <path class="g-area" d="${market ? pathOf('market') : path}L${endX.toFixed(1)} ${y(0)}L${m.l} ${y(0)}Z"/>
+    ${market ? `<path class="g-line invested" d="${path}"/><path class="g-line" d="${pathOf('market')}"/>` : `<path class="g-line" d="${path}"/>
+    <line class="g-gap" x1="${endX}" x2="${endX}" y1="${y(last.value)}" y2="${y(value)}"/>`}
+    ${points.filter(p => p.notes.length).map(p => `<circle class="g-mark" cx="${x(p.date)}" cy="${y(p.market ?? p.value)}" r="4"/>`).join('')}
+    <circle class="g-today" cx="${endX}" cy="${y(value)}" r="6"/>
+    <text class="g-label" ${side} y="${y(value) + (narrow ? -12 : 4)}">Today ${compact(value)}</text>
+    ${apart ? `<text class="g-axis" ${side} y="${y(last.value) + (narrow ? 18 : 4)}">Invested ${compact(last.value)}</text>` : ''}
+    <line class="g-cross" id="g-cross" y1="${m.t}" y2="${h - m.b}" hidden/>
+  </svg><div class="g-tip" id="g-tip" hidden></div>`;
+  const tip = A.$('#g-tip'), cross = A.$('#g-cross');
+  box.onpointermove = e => {
+    const px = e.clientX - box.getBoundingClientRect().left;
+    const p = points.reduce((a, b) => (Math.abs(x(b.date) - px) < Math.abs(x(a.date) - px) ? b : a));
+    cross.setAttribute('x1', x(p.date));
+    cross.setAttribute('x2', x(p.date));
+    cross.removeAttribute('hidden');
+    tip.hidden = false;
+    const worth = market ? `<span>Opened at ${p.openText}</span><span>Closed at ${p.marketText}</span>` : p === last ? `<span>Market value ${growth.valueText}</span>` : '';
+    tip.innerHTML = `<strong>${p.label}</strong><span>Invested ${p.text}</span>${worth}${p.notes.map(n => `<span>${A.esc(n)}</span>`).join('')}`;
+    tip.style.left = `${Math.min(Math.max(x(p.date) - tip.offsetWidth / 2, 0), w - tip.offsetWidth)}px`;
+  };
+  box.onpointerleave = () => { tip.hidden = true; cross.setAttribute('hidden', ''); };
+}
+
+/* ---------- performance ---------- */
+
+const PERF_GROUPS = { type: 'Instrument type', cap: 'Market cap', sector: 'Sector' };
+const INDIA_INDICES = ['nifty50', 'next50', 'mid150'];
+const US_INDICES = ['nasdaq100', 'sp500'];
+const perfGroup = () => { const key = A.ls.get('pfPerfGroup', 'type'); return PERF_GROUPS[key] ? key : 'type'; };
+
+// Skips commodities and crypto. Funds of US shares count as US, wherever they're held.
+function perfType(account, line) {
+  if (line.group === 'Commodities' || line.group === 'Crypto') return null;
+  if (line.group === 'Debt') return 'Debt';
+  const fund = line.mutualFund || line.group === 'ETFs';
+  if (isUsd(account)) return fund ? 'US MF' : 'US stocks';
+  if (fund && /\b(nasdaq|s\s*(&|and)\s*p\s*500|u\.?\s?s\.?|american?)(?=\W|$)/i.test(`${line.symbol} ${line.name}`)) return 'US MF';
+  return line.mutualFund ? 'Mutual funds' : 'Indian stocks';
+}
+
+// An index's level on a date, read between that month's open and close.
+function indexLevel(months, keys, date) {
+  const key = date.slice(0, 7);
+  const candle = months[key];
+  if (candle) return candle[0] + (candle[1] - candle[0]) * Math.min(Number(date.slice(8)), 30) / 30;
+  const before = keys.filter(k => k < key).at(-1);
+  return before ? months[before][1] : months[keys[0]][0];
+}
+
+// What the same money, in and out on the same dates, would have made in the index.
+function benchmarkXirr(lines, id) {
+  const months = A.S.priceMonths.find(m => m.symbol === benchmarkKey(id))?.months;
+  const keys = Object.keys(months ?? {}).sort();
+  if (!keys.length) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  const flows = lines.flatMap(l => (l.flows ?? []).filter(f => !(f.date === today && f.amount === l.value)));
+  if (!flows.length) return null;
+  const units = flows.reduce((n, f) => n - f.amount / indexLevel(months, keys, f.date), 0);
+  return xirr([...flows, { date: today, amount: units * months[keys.at(-1)][1] }]);
+}
+
+function indexCell(lines, id, yours) {
+  const theirs = benchmarkXirr(lines, id);
+  if (theirs == null) return '<td class="num">–</td>';
+  const gap = yours == null ? null : yours - theirs;
+  return `<td class="num">${pct(theirs)}${gap == null ? '' : `<small class="${tone(gap)}">${Math.abs(gap).toFixed(2)} pts ${gap >= 0 ? 'ahead' : 'behind'}</small>`}</td>`;
+}
+
+// Month-end value of the same money in each index, beside your own value.
+function perfGrowth(rows, indices, brokers) {
+  const today = new Date().toISOString().slice(0, 10);
+  const flows = rows.flatMap(l => (l.flows ?? []).filter(f => !(f.date === today && f.amount === l.value))).sort((a, b) => a.date.localeCompare(b.date));
+  if (!flows.length) return null;
+  const keys = [];
+  for (let k = monthKey(flows[0].date); k <= monthKey(today); k = nextMonth(k)) keys.push(k);
+  const walk = fn => {
+    let at = 0, total = 0;
+    return keys.map(k => {
+      while (at < flows.length && monthKey(flows[at].date) === k) total += fn(flows[at++]);
+      return total;
+    });
+  };
+  const series = indices.flatMap(id => {
+    const months = A.S.priceMonths.find(m => m.symbol === benchmarkKey(id))?.months;
+    const known = Object.keys(months ?? {}).sort();
+    if (!known.length) return [];
+    return [{ id, label: BENCHMARKS[id][0], units: walk(f => -f.amount / indexLevel(months, known, f.date)), levels: keys.map(k => indexLevel(months, known, `${k}-30`)) }];
+  });
+  const history = showMarketHistory();
+  const held = history ? monthlyValues(brokers, keys, new Set(rows.map(l => `${l.account.id}:${l.symbol}`))).values : null;
+  const net = walk(f => -f.amount);
+  const yours = keys.map((k, i) => (held ? held.get(k).close : net[i]));
+  yours[yours.length - 1] = summarizeAll(rows).value;
+  return {
+    labels: keys.map(k => monthText(k, { month: 'short', year: 'numeric' })),
+    dates: keys,
+    series: [{ id: 'you', label: history ? 'Your value' : 'Your net money in, then value today', values: yours }, ...series],
+  };
+}
+
+const PERF_RANGES = { 1: '1M', 3: '3M', 6: '6M', 12: '1Y', 60: '5Y', all: 'All time' };
+const perfRange = () => { const key = A.ls.get('pfPerfRange', 'all'); return PERF_RANGES[key] ? String(key) : 'all'; };
+
+// The chosen period. Each index restarts from your value on its first month, then
+// follows your money from there, so the lines show that period alone.
+function inRange(chart) {
+  const range = perfRange();
+  const start = range === 'all' ? 0 : Math.max(chart.dates.length - 1 - Number(range), 0);
+  const [you, ...others] = chart.series;
+  const series = [{ ...you, values: you.values.slice(start) }, ...others.map(s => {
+    const base = start ? you.values[start] / s.levels[start] : s.units[0];
+    return { ...s, values: s.levels.map((level, i) => (base + s.units[i] - s.units[start]) * level).slice(start) };
+  })];
+  return { dates: chart.dates.slice(start), labels: chart.labels.slice(start), series };
+}
+
+const perfCharts = [];
+const chartSlot = chart => {
+  if (!chart) return '';
+  perfCharts.push(chart);
+  return `<div class="pf-growth pf-chart" data-chart="${perfCharts.length - 1}"></div>`;
+};
+const chartLegend = (ids, you) => `<div class="g-legend">${you ? `<span><i class="g-key s-you"></i>${A.esc(you)}</span>` : ''}${ids.map(id => `<span><i class="g-key s-${id}"></i>${BENCHMARKS[id][0]}</span>`).join('')}</div>`;
+
+function drawLines(box, chart) {
+  const { series, dates, labels } = chart;
+  const w = box.clientWidth, narrow = w < 560, h = narrow ? 230 : 300;
+  const m = { l: 56, r: narrow ? 14 : 96, t: 14, b: 26 };
+  const x = i => m.l + i / Math.max(dates.length - 1, 1) * (w - m.l - m.r);
+  const peak = Math.max(...series.flatMap(s => s.values)) || 1;
+  const unit = 10 ** Math.floor(Math.log10(peak));
+  const top = Math.ceil(peak / unit * 2) / 2 * unit;
+  const y = v => m.t + (1 - Math.max(v, 0) / top) * (h - m.t - m.b);
+  // Months for a short period, years for a long one.
+  const short = dates.length <= 25;
+  const years = [...new Set(dates.map(d => d.slice(0, 4)))];
+  const every = Math.ceil((short ? dates.length : years.length) / (narrow ? 4 : short ? 7 : 9));
+  const ticks = short
+    ? dates.map((_, i) => i).filter(i => i % every === 0).map(i => [i, labels[i]])
+    : years.filter((_, i) => i % every === 0).map(yr => [Math.max(dates.indexOf(`${yr}-01`), 0), yr]);
+  // Lines finishing close together keep only the legend, so labels don't pile up.
+  let lastY = -Infinity;
+  const ends = narrow ? [] : [...series].sort((a, b) => y(a.values.at(-1)) - y(b.values.at(-1))).filter(s => {
+    const at = y(s.values.at(-1));
+    if (at - lastY < 15) return false;
+    lastY = at;
+    return true;
+  });
+  box.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    ${[0, 1, 2, 3, 4].map(i => { const t = top * i / 4; return `<line class="g-grid" x1="${m.l}" x2="${w - m.r}" y1="${y(t)}" y2="${y(t)}"/><text class="g-axis" x="${m.l - 8}" y="${y(t) + 4}" text-anchor="end">${compact(t)}</text>`; }).join('')}
+    ${ticks.map(([i, text]) => `<text class="g-axis" x="${x(i)}" y="${h - 8}" text-anchor="${i ? 'middle' : 'start'}">${text}</text>`).join('')}
+    ${[...series].reverse().map(s => `<path class="g-series s-${s.id}" d="${s.values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join('')}"/>`).join('')}
+    ${series.map(s => `<circle class="g-end s-${s.id}" cx="${x(dates.length - 1)}" cy="${y(s.values.at(-1))}" r="4"/>`).join('')}
+    ${ends.map(s => `<text class="g-axis" x="${x(dates.length - 1) + 9}" y="${y(s.values.at(-1)) + 4}">${compact(s.values.at(-1))}</text>`).join('')}
+    <line class="g-cross" y1="${m.t}" y2="${h - m.b}" hidden/>
+  </svg><div class="g-tip" hidden></div>`;
+  const tip = box.querySelector('.g-tip'), cross = box.querySelector('.g-cross');
+  box.onpointermove = e => {
+    const px = e.clientX - box.getBoundingClientRect().left;
+    const i = Math.round(Math.min(Math.max((px - m.l) / (w - m.l - m.r), 0), 1) * (dates.length - 1));
+    cross.setAttribute('x1', x(i));
+    cross.setAttribute('x2', x(i));
+    cross.removeAttribute('hidden');
+    tip.hidden = false;
+    tip.innerHTML = `<strong>${labels[i]}</strong>${[...series].sort((a, b) => b.values[i] - a.values[i]).map(s => `<span><i class="g-key s-${s.id}"></i> ${A.esc(s.label)} ${money(s.values[i])}</span>`).join('')}`;
+    tip.style.left = `${Math.min(Math.max(x(i) - tip.offsetWidth / 2, 0), w - tip.offsetWidth)}px`;
+  };
+  box.onpointerleave = () => { tip.hidden = true; cross.setAttribute('hidden', ''); };
+}
+
+const drawChart = box => {
+  const chart = perfCharts[box.dataset.chart];
+  if (chart) drawLines(box, inRange(chart));
+};
+
+function perfTable(title, groups, indices, noIndex = [], growth = null, growthNote = '') {
+  if (!groups.length) return '';
+  const all = groups.flatMap(([, list]) => list);
+  const line = (list, compare) => {
+    const s = summarizeAll(list);
+    return `<td class="num">${list.filter(l => l.qty > EPS).length}</td>
+      <td class="num">${money(s.cost)}</td>
+      <td class="num">${money(s.value)}</td>
+      <td class="num ${tone(s.gain)}">${money(s.gain, true)}<small>${pct(s.gainPct)}</small></td>
+      <td class="num ${tone(s.xirr)}">${pct(s.xirr)}</td>
+      ${indices.map(id => (compare ? indexCell(list, id, s.xirr) : '<td class="num">–</td>')).join('')}`;
+  };
+  return `<section class="panel"><h2>${title}</h2>
+    ${growth ? `<h3 class="g-title">Same money in each index</h3>
+      <p class="muted small chart-note">${growthNote}</p>
+      <div class="seg pf-assets" role="group" aria-label="Period">${Object.entries(PERF_RANGES).map(([k, label]) => `<button data-range="${k}" aria-pressed="${k === perfRange()}">${label}</button>`).join('')}</div>
+      ${chartLegend(growth.series.slice(1).map(s => s.id), growth.series[0].label)}
+      ${chartSlot(growth)}` : ''}
+    <div class="holdings-wrap"><table class="holdings pf-summary">
+    <thead><tr><th>${PERF_GROUPS[perfGroup()]}</th>${['Holdings', 'Invested', 'Market value', 'Total gain', 'XIRR', ...indices.map(id => BENCHMARKS[id][0])].map(h => `<th class="num">${h}</th>`).join('')}</tr></thead>
+    <tbody>${groups.map(([name, list]) => `<tr><th scope="row">${A.esc(name)}</th>${line(list, !noIndex.includes(name))}</tr>`).join('')}</tbody>
+    ${groups.length > 1 ? `<tfoot><tr><th scope="row">Total</th>${line(all, !noIndex.length)}</tr></tfoot>` : ''}
+  </table></div></section>`;
+}
+
+function performanceReport() {
+  const brokers = reportBrokers();
+  const rows = brokers.flatMap(({ account, c, rate }) => c.lines.flatMap(l => {
+    const type = perfType(account, l);
+    return type ? [{ ...(rate === 1 ? l : inRupees(l, rate)), type, account }] : [];
+  }));
+  perfCharts.length = 0;
+  const key = perfGroup();
+  const filters = reportFilters(null, `<label for="r-perf">Group by</label><select class="select" id="r-perf">${Object.entries(PERF_GROUPS).map(([k, label]) => `<option value="${k}"${k === key ? ' selected' : ''}>${label}</option>`).join('')}</select>`);
+  if (!rows.length) return `${filters}<div class="empty">${icon('chart')}<p>Nothing to compare for this selection.</p></div>`;
+  const byType = (...types) => types.map(t => [t, rows.filter(l => l.type === t)]).filter(([, list]) => list.length);
+  const bands = list => orderBands(key, new Set(list.map(l => bandOf(key, l)))).map(b => [b, list.filter(l => bandOf(key, l) === b)]);
+  const shareLike = l => l.group === 'Stocks' || l.group === 'ETFs';
+  const indian = rows.filter(l => l.type === 'Indian stocks');
+  const american = rows.filter(l => l.type.startsWith('US') && (key === 'type' || shareLike(l)));
+  const growthNote = name => `${name}: each index starts from your value on the period's first month, then takes the same money in and out as you did. Prices are monthly, so 1M runs from the last month-end.${showMarketHistory() ? '' : ' Turn on Past market value in the Timeline report to plot your value month by month.'}`;
+  const india = perfGrowth(indian, INDIA_INDICES, brokers);
+  const us = perfGrowth(american, US_INDICES, brokers);
+  const tables = key === 'type'
+    ? [perfTable('India', byType('Indian stocks', 'Debt', 'Mutual funds'), INDIA_INDICES, ['Debt'], india, growthNote('Indian stocks')), perfTable('US', byType('US stocks', 'US MF'), US_INDICES, [], us, growthNote('US stocks and funds'))]
+    : [perfTable('Indian stocks', bands(indian), INDIA_INDICES, [], india, growthNote('Indian stocks')), perfTable('US stocks', bands(american), US_INDICES, [], us, growthNote('US stocks and ETFs'))];
+  const s = summarizeAll(rows);
+  return `${filters}
+    <div class="stats">
+      ${stat(`Value covered${info('performance')}`, money(s.value), 'Commodities and crypto left out')}
+      ${stat('Invested', money(s.cost), s.unpriced ? `${s.unpriced} unpriced left out` : '')}
+      ${stat('Total gain', money(s.gain, true), pct(s.gainPct), tone(s.gain))}
+      ${stat(`XIRR${info('xirr')}`, pct(s.xirr), 'Annual return, all time', tone(s.xirr))}
+    </div>
+    <div class="status" id="pf-status">${statusLine()}</div>
+    ${tables.join('')}
+    <p class="muted small chart-note">Each index column shows the annual return if the same money had gone in and out of that index on the same dates. Indices leave out dividends, and US indices are in dollars, so they leave out rupee moves.</p>`;
+}
+
 function reportsView(r) {
   const tab = REPORTS[r.tab] ? r.tab : 'dividends';
-  const body = tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : dividendReport();
+  const body = tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : tab === 'timeline' ? timelineReport() : tab === 'performance' ? performanceReport() : dividendReport();
   A.view.innerHTML = `
     ${hero('Reports', REPORTS[tab], HOME)}
     <div class="seg tabs" role="group" aria-label="Report">
@@ -1486,10 +2089,174 @@ function reportsView(r) {
   // A long chart opens on the latest months.
   const bars = A.$('.months.long');
   if (bars) bars.scrollLeft = bars.scrollWidth;
+  const chart = A.$('#pf-growth');
+  if (chart) {
+    drawGrowth();
+    new ResizeObserver(drawGrowth).observe(chart);
+  }
+  A.view.querySelectorAll('.pf-chart').forEach(box => {
+    drawChart(box);
+    new ResizeObserver(() => drawChart(box)).observe(box);
+  });
+  A.view.querySelectorAll('[data-range]').forEach(b => b.addEventListener('click', () => {
+    A.ls.set('pfPerfRange', b.dataset.range);
+    A.view.querySelectorAll('[data-range]').forEach(x => x.setAttribute('aria-pressed', x.dataset.range === b.dataset.range));
+    A.view.querySelectorAll('.pf-chart').forEach(drawChart);
+  }));
   A.$('#r-broker').addEventListener('change', e => { R.broker = e.target.value; reportsView(r); });
-  A.$('#r-year').addEventListener('change', e => { R.year = e.target.value; reportsView(r); });
-  A.$('#r-detail').addEventListener('change', e => { A.ls.set('pfReportDetail', e.target.checked); reportsView(r); });
+  A.$('#r-year')?.addEventListener('change', e => { R.year = e.target.value; reportsView(r); });
+  A.$('#r-detail')?.addEventListener('change', e => { A.ls.set('pfReportDetail', e.target.checked); reportsView(r); });
+  A.$('#r-perf')?.addEventListener('change', e => { A.ls.set('pfPerfGroup', e.target.value); reportsView(r); });
   A.$('#r-payers')?.addEventListener('change', e => { A.ls.set('pfPayersOnly', e.target.checked); reportsView(r); });
+  A.$('#r-market')?.addEventListener('change', e => { A.ls.set('pfTimelineMarket', e.target.checked); reportsView(r); refreshMonthly(); });
+}
+
+/* ---------- data sources ---------- */
+
+const DATA_MODES = {
+  internet: ['Internet', 'Prices, dividends, splits and history all download from the public sources.'],
+  backup: ['Local backup', 'Nothing is downloaded. Everything comes from public data files you imported, and stops at their date.'],
+  hybrid: ['Hybrid', 'Recent months and today\'s prices download. Older months come from your backup, so far less is fetched.'],
+};
+
+function dataView() {
+  const rows = publicSummary(A.S.market, A.S.priceMonths);
+  const mode = dataMode();
+  const months = key => (key ? monthText(key, { month: 'short', year: 'numeric' }) : '–');
+  const empty = !rows.some(x => x.symbols || x.withHistory);
+  A.view.innerHTML = `${hero('Data sources', DATA_MODES[mode][0], HOME)}
+    <div class="scroll"><div class="pay-page pf-page">
+      <section class="panel">
+        <h2>Where public data comes from${info('publicData')}</h2>
+        <div class="pf-modes" role="radiogroup" aria-label="Public data source">
+          ${Object.entries(DATA_MODES).map(([k, [label, text]]) => `<label class="pf-mode"><input type="radio" name="pf-mode" value="${k}"${k === mode ? ' checked' : ''}><span><strong>${label}</strong><small>${text}</small></span></label>`).join('')}
+        </div>
+        ${mode === 'hybrid' ? `<div class="pf-sort"><label for="pf-recent">Use the internet for the last</label>
+          <select class="select" id="pf-recent">${[3, 6, 12, 24].map(n => `<option value="${n}"${n === recentMonths() ? ' selected' : ''}>${n} months</option>`).join('')}</select></div>` : ''}
+        ${mode !== 'internet' && empty ? `<div class="status">${icon('alert')}<span>There's no public data on this device yet. Import a backup below.</span></div>` : ''}
+      </section>
+      <section class="panel">
+        <h2>Public data on this device</h2>
+        <div class="holdings-wrap"><table class="holdings pf-summary">
+          <thead><tr><th>Market</th><th class="num">Tickers</th><th class="num">With monthly prices</th><th class="num">Month files</th><th class="num">From</th><th class="num">To</th><th class="num">Latest price</th></tr></thead>
+          <tbody>${rows.map(x => `<tr><th scope="row">${x.label}</th><td class="num">${x.symbols}</td><td class="num">${x.withHistory}</td><td class="num">${x.files}</td><td class="num">${months(x.first)}</td><td class="num">${months(x.last)}</td><td class="num">${x.quotedAt ? A.relDate(x.quotedAt) : '–'}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </section>
+      <section class="panel">
+        <h2>Back up and restore</h2>
+        <p class="muted small chart-note">One folder a market and one file a month, in a new dated folder each time. Files hold public prices and tickers only, with no quantities or amounts, though the tickers do show what you've held.${A.ls.get('pfPublicBackupAt', 0) ? ` Last backed up ${A.relDate(A.ls.get('pfPublicBackupAt', 0))}.` : ''}</p>
+        <div class="btn-row">
+          <button class="btn sm primary" data-act="pf-public-backup">${icon('download')}<span>Back up public data</span></button>
+          <label class="btn sm">${icon('upload')}<span>Import a folder</span><input id="pf-public-folder" type="file" webkitdirectory hidden></label>
+          <label class="btn sm">${icon('upload')}<span>Import files or zip</span><input id="pf-public-files" type="file" multiple accept=".json,.zip,application/json,application/zip" hidden></label>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Backup files and their sources</h2>
+        <p class="muted small chart-note">Each file also names its sources inside it, and manifest.json lists them all.</p>
+        <div class="holdings-wrap"><table class="holdings lots pf-disclosure">
+          <thead><tr><th>File</th><th>Holds</th><th>Source</th></tr></thead>
+          <tbody>${BACKUP_FILES.map(f => f.parts.map(([what, id], i) => {
+            const s = SOURCES[id];
+            return `<tr>${i ? '' : `<td rowspan="${f.parts.length}"><strong>${f.label}</strong><br><code>${f.id}/YYYY-MM.json</code></td>`}<td>${A.esc(what)}</td><td>${s.url ? `<a href="${s.url}" target="_blank" rel="noopener noreferrer">${A.esc(s.name)}</a>` : A.esc(s.name)}</td></tr>`;
+          }).join('')).join('')}</tbody>
+        </table></div>
+      </section>
+      <section class="panel">
+        <h2>What a backup contains</h2>
+        <p class="muted small chart-note">Latest only means one snapshot, in the file for the month it was fetched, so past values aren't kept. In Local backup mode these figures stay as they stood on the backup date.</p>
+        <div class="holdings-wrap"><table class="holdings lots pf-disclosure">
+          <thead><tr><th>Data</th><th>Kept</th><th>Field in the file</th></tr></thead>
+          <tbody>${BACKUP_CONTENTS.map(([what, kept, field]) => `<tr><td>${A.esc(what)}</td><td>${A.esc(kept)}</td><td><code>${A.esc(field)}</code></td></tr>`).join('')}</tbody>
+        </table></div>
+      </section>
+      <section class="panel">
+        <h2>Not in a backup</h2>
+        <ul class="pf-notes">${BACKUP_LEAVES_OUT.map(t => `<li>${A.esc(t)}</li>`).join('')}</ul>
+        <p class="muted small chart-note">${A.esc(BACKUP_NEEDS_NOTHING)}</p>
+      </section>
+    </div></div>`;
+  A.view.querySelectorAll('[name=pf-mode]').forEach(b => b.addEventListener('change', () => {
+    A.ls.set('pfDataSource', b.value);
+    setOffline(b.value === 'backup');
+    dataView();
+    A.refresh();
+    if (b.value !== 'backup') refreshMarket();
+  }));
+  A.$('#pf-recent')?.addEventListener('change', e => A.ls.set('pfDataRecent', Number(e.target.value)));
+  for (const id of ['#pf-public-folder', '#pf-public-files']) {
+    A.$(id).addEventListener('change', e => {
+      const files = [...e.target.files];
+      e.target.value = '';
+      if (files.length) importPublic(files);
+    });
+  }
+}
+
+// A new dated folder each time, so no backup replaces an earlier one.
+async function freshFolder(root, base) {
+  for (let v = 1; ; v++) {
+    const name = v === 1 ? base : `${base}-v${v}`;
+    const taken = await root.getDirectoryHandle(name).then(() => true, () => false);
+    if (!taken) return root.getDirectoryHandle(name, { create: true });
+  }
+}
+
+async function backupPublic() {
+  const stamp = new Date().toISOString();
+  const files = publicFiles(A.S.market, A.S.priceMonths, stamp);
+  const base = `superapp-public-data-${stamp.slice(0, 10)}`;
+  const saved = text => {
+    A.ls.set('pfPublicBackupAt', Date.now());
+    A.toast(text);
+    if (A.S.route?.page === 'data') dataView();
+  };
+  if (!window.showDirectoryPicker) {
+    A.downloadFile(new File([zipFiles(files, base)], `${base}.zip`, { type: 'application/zip' }));
+    return saved(`Saved ${A.plural(files.length - 1, 'month file')} as a zip`);
+  }
+  let root;
+  try {
+    root = await window.showDirectoryPicker({ mode: 'readwrite' });
+  } catch {
+    return;
+  }
+  const folder = await freshFolder(root, base);
+  for (const { path, text } of files) {
+    const parts = path.split('/');
+    const dir = parts.length > 1 ? await folder.getDirectoryHandle(parts[0], { create: true }) : folder;
+    const writer = await (await dir.getFileHandle(parts.at(-1), { create: true })).createWritable();
+    await writer.write(text);
+    await writer.close();
+  }
+  saved(`Saved ${A.plural(files.length - 1, 'month file')} to ${folder.name}`);
+}
+
+async function importPublic(files) {
+  try {
+    const texts = [];
+    for (const f of files) {
+      if (f.name.endsWith('.zip')) texts.push(...(await unzipFiles(await f.arrayBuffer())).map(x => x.text));
+      else if (f.name.endsWith('.json')) texts.push(await f.text());
+    }
+    const parsed = texts.flatMap(t => { try { return [JSON.parse(t)]; } catch { return []; } });
+    const { used, market, priceMonths } = applyPublicFiles(parsed, A.S.market, A.S.priceMonths);
+    if (!used) return A.toast('No public data files found there');
+    const clean = market.map(cleanMarket).filter(Boolean);
+    const bySymbol = new Map(clean.map(m => [m.symbol, m]));
+    A.S.market = [...A.S.market.filter(m => !bySymbol.has(m.symbol)), ...clean];
+    const series = new Map(priceMonths.map(m => [m.symbol, m]));
+    A.S.priceMonths = [...A.S.priceMonths.filter(m => !series.has(m.symbol)), ...priceMonths];
+    await db.putMany('market', clean);
+    await db.putMany('priceMonths', priceMonths);
+    const latest = Math.max(0, ...clean.map(m => m.quotedAt ?? 0));
+    if (latest > A.ls.get('pfQuotedAt', 0)) A.ls.set('pfQuotedAt', latest);
+    invalidate();
+    A.refresh();
+    A.toast(`Imported ${A.plural(used, 'month file')} covering ${A.plural(new Set([...bySymbol.keys(), ...series.keys()]).size, 'ticker')}`);
+  } catch (e) {
+    A.toast(`Could not import: ${e.message}`);
+  }
 }
 
 /* ---------- one stock ---------- */
@@ -1881,6 +2648,7 @@ export async function portfolioAction(b) {
   switch (act) {
     case 'pf-menu': return accountMenu(id);
     case 'pf-refresh': return refreshMarket(true);
+    case 'pf-public-backup': return backupPublic();
     case 'pf-backup': return saveBackup();
     case 'pf-info': return showSource(id);
     case 'pf-privacy':
@@ -1940,6 +2708,8 @@ export function portfolioView(r) {
   else if (mergedPage) consolidatedView();
   else if (r.page === 'reports') reportsView(r);
   else if (r.page === 'transfers') transfersView();
+  else if (r.page === 'data') dataView();
+  else if (r.page === 'disclosure') disclosureView();
   else if (r.page === 'account') accountView(r);
   else if (r.page === 'stock') stockView(r);
   else if (r.page === 'reconcile') reconcileView(r);

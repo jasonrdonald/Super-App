@@ -4,6 +4,11 @@
 
 const timed = (ms = 20000) => AbortSignal.timeout(ms);
 
+// Local backup mode stops every call here, so nothing can reach the internet.
+let offline = false;
+export const setOffline = on => { offline = on; };
+const web = (...args) => (offline ? Promise.reject(new Error('Public data is set to local backup')) : fetch(...args));
+
 /* ---------- stock prices: TradingView's public scanner, delayed 15 minutes ---------- */
 
 const tvTicker = (exchange, s) => `${exchange}:${s.replace(/-/g, '_')}`;
@@ -38,7 +43,7 @@ function fundamentalsFrom(d) {
 }
 
 async function scan(tickers) {
-  const res = await fetch('https://scanner.tradingview.com/india/scan', {
+  const res = await web('https://scanner.tradingview.com/india/scan', {
     method: 'POST', signal: timed(),
     body: JSON.stringify({ symbols: { tickers }, columns: SCAN_COLUMNS }),
   });
@@ -67,7 +72,7 @@ export async function stockQuotes(symbols) {
 
 // US tickers, found by name as each sits on one of several exchanges.
 export async function usQuotes(symbols) {
-  const res = await fetch('https://scanner.tradingview.com/america/scan', {
+  const res = await web('https://scanner.tradingview.com/america/scan', {
     method: 'POST', signal: timed(),
     body: JSON.stringify({ filter: [{ left: 'name', operation: 'in_range', right: symbols }], columns: SCAN_COLUMNS, range: [0, symbols.length * 2] }),
   });
@@ -81,7 +86,7 @@ export async function usQuotes(symbols) {
 
 // Rupees per US dollar.
 export async function usdInr() {
-  const res = await fetch('https://scanner.tradingview.com/forex/scan', {
+  const res = await web('https://scanner.tradingview.com/forex/scan', {
     method: 'POST', signal: timed(),
     body: JSON.stringify({ symbols: { tickers: ['FX_IDC:USDINR'] }, columns: ['close'] }),
   });
@@ -95,7 +100,7 @@ let listed;
 export async function listedSecurities() {
   if (listed) return listed;
   const fetchExchange = async exchange => {
-    const res = await fetch('https://scanner.tradingview.com/india/scan', {
+    const res = await web('https://scanner.tradingview.com/india/scan', {
       method: 'POST', signal: timed(40000),
       body: JSON.stringify({ filter: [{ left: 'exchange', operation: 'equal', right: exchange }], columns: ['name', 'description', 'isin', 'close'], range: [0, 20000] }),
     });
@@ -114,24 +119,22 @@ export const EVENT_GAP_MS = 3300;
 
 const relays = [
   async url => {
-    const res = await fetch(`https://r.jina.ai/${url}`, { signal: timed() });
+    const res = await web(`https://r.jina.ai/${url}`, { signal: timed() });
     if (res.status === 429) throw new Error('busy');
     return res.text();
   },
   async url => {
-    const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { signal: timed(30000) });
+    const res = await web(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { signal: timed(30000) });
     return (await res.json()).contents;
   },
 ];
 
 const dayOf = seconds => new Date((seconds + 19800) * 1000).toISOString().slice(0, 10);
 
-// Resolves to { splits, dividends }, or null when Yahoo doesn't know the ticker.
-export async function stockEvents(symbol, from, us) {
+// Resolves to Yahoo's chart for a ticker, or null when it doesn't know it.
+async function yahooChart(ticker, from, query) {
   const start = Math.floor(new Date(from).getTime() / 1000);
-  // Yahoo writes share classes with a dash, as in BRK-B.
-  const ticker = us ? symbol.replace('.', '-') : `${symbol}.NS`;
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${start}&period2=${Math.floor(Date.now() / 1000)}&interval=1wk&events=div%2Csplit`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${start}&period2=${Math.floor(Date.now() / 1000)}&${query}`;
   let lastError;
   for (const relay of relays) {
     try {
@@ -141,14 +144,7 @@ export async function stockEvents(symbol, from, us) {
         if (/Not Found|404/.test(text)) return null;
         throw new Error('Unexpected answer');
       }
-      const chart = JSON.parse(text.slice(at, text.lastIndexOf('}') + 1)).chart;
-      const result = chart.result?.[0];
-      if (!result) return null;
-      const events = result.events ?? {};
-      return {
-        splits: Object.values(events.splits ?? {}).map(s => ({ date: dayOf(s.date), num: s.numerator, den: s.denominator })),
-        dividends: Object.values(events.dividends ?? {}).map(d => ({ date: dayOf(d.date), amount: d.amount })),
-      };
+      return JSON.parse(text.slice(at, text.lastIndexOf('}') + 1)).chart.result?.[0] ?? null;
     } catch (e) {
       lastError = e;
     }
@@ -156,12 +152,39 @@ export async function stockEvents(symbol, from, us) {
   throw lastError;
 }
 
+// Yahoo writes share classes with a dash, as in BRK-B.
+const stockTicker = (symbol, us) => (us ? symbol.replace('.', '-') : `${symbol}.NS`);
+
+// Resolves to { splits, dividends }, or null when Yahoo doesn't know the ticker.
+export async function stockEvents(symbol, from, us) {
+  const result = await yahooChart(stockTicker(symbol, us), from, 'interval=1wk&events=div%2Csplit');
+  if (!result) return null;
+  const events = result.events ?? {};
+  return {
+    splits: Object.values(events.splits ?? {}).map(s => ({ date: dayOf(s.date), num: s.numerator, den: s.denominator })),
+    dividends: Object.values(events.dividends ?? {}).map(d => ({ date: dayOf(d.date), amount: d.amount })),
+  };
+}
+
+// Month to [open, close], in today's share units as Yahoo adjusts for splits.
+export async function monthlyPrices(symbol, from, kind) {
+  const ticker = kind === 'index' ? symbol : kind === 'crypto' ? `${symbol}-INR` : stockTicker(symbol, kind === 'us');
+  const result = await yahooChart(ticker, from, 'interval=1mo');
+  const quote = result?.indicators?.quote?.[0];
+  if (!quote) return null;
+  const months = {};
+  (result.timestamp ?? []).forEach((t, i) => {
+    if (quote.open[i] != null && quote.close[i] != null) months[dayOf(t).slice(0, 7)] = [quote.open[i], quote.close[i]];
+  });
+  return months;
+}
+
 /* ---------- mutual funds: mfapi.in ---------- */
 
 const words = s => s.toLowerCase().replace(/[^a-z0-9& ]+/g, '').split(/\s+/).filter(Boolean);
 
 async function searchFunds(query) {
-  const res = await fetch(`https://api.mfapi.in/mf/search?q=${encodeURIComponent(query)}`, { signal: timed() });
+  const res = await web(`https://api.mfapi.in/mf/search?q=${encodeURIComponent(query)}`, { signal: timed() });
   return res.json();
 }
 
@@ -194,18 +217,30 @@ let codes;
 // callers keep the code once they have it.
 export async function fundCodes() {
   if (codes) return codes;
-  const list = await (await fetch('https://api.mfapi.in/mf', { signal: timed(60000) })).json();
+  const list = await (await web('https://api.mfapi.in/mf', { signal: timed(60000) })).json();
   codes = new Map(list.flatMap(f => [[f.isinGrowth, f.schemeCode], [f.isinDivReinvestment, f.schemeCode]]).filter(([isin]) => isin));
   return codes;
 }
 
 export async function fundNav(code) {
-  const nav = await (await fetch(`https://api.mfapi.in/mf/${code}`, { signal: timed() })).json();
+  const nav = await (await web(`https://api.mfapi.in/mf/${code}`, { signal: timed() })).json();
   const [latest, previous] = nav.data ?? [];
   if (!latest) return null;
   const price = Number(latest.nav);
   const change = previous ? price - Number(previous.nav) : null;
   return { price, change, changePct: change == null ? null : change / Number(previous.nav) * 100 };
+}
+
+// The first and last NAV of each month, from the daily list, which runs newest first.
+export async function fundMonths(code) {
+  const nav = await (await web(`https://api.mfapi.in/mf/${code}`, { signal: timed() })).json();
+  const months = {};
+  for (const { date, nav: value } of nav.data ?? []) {
+    const [, m, y] = date.split('-');
+    const key = `${y}-${m}`;
+    months[key] = [Number(value), months[key]?.[1] ?? Number(value)];
+  }
+  return months;
 }
 
 /* ---------- crypto: CoinGecko ---------- */
@@ -228,12 +263,12 @@ export async function cryptoQuotes(symbols, currency = 'inr') {
     const known = COINS[symbol.toUpperCase()];
     if (known && !known[0]) { quotes.set(symbol, { price: null, changePct: null, change: null, name: known[1] }); continue; }
     if (known) { ids.set(known[0], symbol); continue; }
-    const res = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(symbol)}`, { signal: timed() }).catch(() => null);
+    const res = await web(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(symbol)}`, { signal: timed() }).catch(() => null);
     const coin = res?.ok ? (await res.json()).coins?.find(c => c.symbol.toUpperCase() === symbol.toUpperCase()) : null;
     if (coin) ids.set(coin.id, symbol);
   }
   if (!ids.size) return quotes;
-  const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${[...ids.keys()].join(',')}&vs_currencies=${currency}&include_24hr_change=true`, { signal: timed() });
+  const res = await web(`https://api.coingecko.com/api/v3/simple/price?ids=${[...ids.keys()].join(',')}&vs_currencies=${currency}&include_24hr_change=true`, { signal: timed() });
   for (const [id, q] of Object.entries(await res.json())) {
     const price = q[currency], changePct = q[`${currency}_24h_change`] ?? null;
     const symbol = ids.get(id);

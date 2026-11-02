@@ -49,6 +49,52 @@ export const SOURCES = {
   },
 };
 
+// The public data backup: a folder for each market, one file a month, and what
+// each file holds with the source it came from. The app's own Data sources page
+// and the files themselves both read this.
+const STOCK_FILE = [
+  ['Monthly open and close, in today\'s share units', 'yahoo'],
+  ['Dividends and splits', 'yahoo'],
+  ['Latest price and day change', 'tradingview'],
+  ['Names, sector, fundamentals and momentum', 'tradingviewFundamentals'],
+];
+
+export const BACKUP_FILES = [
+  { id: 'india-stocks', label: 'Indian stocks and ETFs', parts: STOCK_FILE },
+  { id: 'us-stocks', label: 'US stocks and ETFs', parts: STOCK_FILE },
+  { id: 'crypto', label: 'Crypto', parts: [['Monthly open and close, in rupees', 'yahoo'], ['Latest price and day change', 'coingecko']] },
+  { id: 'mutual-funds', label: 'Mutual funds', parts: [['Each month\'s first and last NAV', 'mfapi'], ['Latest NAV and scheme code', 'mfapi']] },
+  { id: 'fx', label: 'Currency rates', parts: [['Latest USD to INR rate', 'tradingview']] },
+  { id: 'indices', label: 'Benchmark indices', parts: [['Monthly open and close of Nifty 50, Nifty Next 50, Nifty Midcap 150, Nasdaq 100 and S&P 500', 'yahoo']] },
+];
+
+export const backupSources = id => Object.fromEntries(BACKUP_FILES.find(f => f.id === id).parts.map(([what, source]) => [what, SOURCES[source].name]));
+
+// Everything a backup keeps, how much of it, and the field it sits under in a month file.
+export const BACKUP_CONTENTS = [
+  ['Monthly open and close, including benchmark indices', 'Full history', 'prices'],
+  ['Dividends', 'Full history, by month paid', 'dividends'],
+  ['Splits', 'Full history, by month of the split', 'splits'],
+  ['Latest price and day change, including fund NAVs and crypto', 'Latest only', 'quotes'],
+  ['USD to INR rate', 'Latest only', 'quotes, in the fx folder'],
+  ['Names and mutual fund scheme codes', 'Latest only', 'quotes'],
+  ['Sector, industry and market cap', 'Latest only', 'quotes'],
+  ['EPS, P/E, P/B, P/S, EV/EBITDA and dividend yield', 'Latest only', 'quotes'],
+  ['ROE, ROCE, ROIC, ROA and margins', 'Latest only', 'quotes'],
+  ['Debt-to-equity, current ratio, free cash flow, Piotroski score, payout and beta', 'Latest only', 'quotes'],
+  ['Revenue, EPS and profit growth', 'Latest only', 'quotes'],
+  ['52-week range, returns, RSI and 200-day average', 'Latest only', 'quotes'],
+];
+
+export const BACKUP_LEAVES_OUT = [
+  'Exchange ticker lists and the mutual fund scheme list, so a new broker file in Local backup mode only matches tickers already on this device.',
+  'Anything you\'ve never held, as only your own tickers are downloaded.',
+  'Daily prices, and past values of anything marked Latest only.',
+  'Tickers the sources have no monthly prices for. Past market value estimates those between cost and today\'s price.',
+];
+
+export const BACKUP_NEEDS_NOTHING = 'Bonuses, mergers, demergers, and rights and IPO prices are built into the app, so they work in every mode.';
+
 // id, label, the sources behind it, and how it's worked out when that isn't obvious.
 export const DATA_POINTS = [
   { id: 'price', label: 'Last price, market value, day gain', sources: ['tradingview', 'mfapi', 'coingecko'], how: 'Indian and US stocks and ETFs from TradingView, funds from MFapi.in, crypto from CoinGecko. Falls back to the holdings file\'s price.' },
@@ -58,6 +104,9 @@ export const DATA_POINTS = [
   { id: 'dividends', label: 'Dividend income', sources: ['yahoo', 'app'], how: 'Each dividend per share times the shares you held the day before its ex-date. Before tax, so US dividends show more than you received after withholding.' },
   { id: 'xirr', label: 'XIRR', sources: ['app', 'broker', 'yahoo', 'tradingview'], how: 'Annual return on dated cash flows: each lot\'s cost, sale proceeds, dividends before tax, and today\'s value. Holdings under a year are annualised, so short periods can look extreme.' },
   { id: 'capitalGains', label: 'Capital gains report', sources: ['broker', 'app'], how: 'Sells matched to buys, oldest first. Long term is over 12 months, or over 24 for US shares. Same-day trades are intraday. Excludes charges and does not apply tax rules such as debt fund treatment, so it is not a tax computation.' },
+  { id: 'performance', label: 'Performance report', sources: ['broker', 'yahoo', 'app'], how: 'Your XIRR, against what the same cash flows on the same dates would have made in each index. Index values on a date are read between that month\'s open and close. On the chart, a shorter period restarts each index from your value on its first month, and prices are monthly, so 1M runs from the last month-end. Indices are price indices, so they leave out dividends, while your return includes them. US indices are in dollars, so they leave out rupee moves. Nifty Midcap 150 history starts in January 2019, and earlier money counts from then. Commodities and crypto are left out.' },
+  { id: 'publicData', label: 'Public data source', sources: ['tradingview', 'yahoo', 'mfapi', 'coingecko'], how: 'Set on the Data sources page. Internet downloads everything. Local backup downloads nothing and uses imported files, so figures stop at the backup\'s date. Hybrid downloads recent months and today\'s prices, and keeps older months from the backup. If a split happens later, older backup months are rescaled to match.' },
+  { id: 'timeline', label: 'Timeline report', sources: ['broker', 'app', 'yahoo', 'mfapi'], how: 'Invested is the cost of what you held at each date, from your trades, with USD at today\'s rate. Past market value appears only when switched on, and is an estimate: shares held at each month\'s end times that month\'s close, from Yahoo for stocks, ETFs and crypto, and MFapi.in for funds. A held item with no price for a month is taken as moving steadily from its cost to today\'s price, and a sold one counts at cost. Those monthly prices stay on this device, go in the public data backup rather than broker backups, and refresh weekly. Highlights are picked from your trades, dividends, transfers and corporate actions, and start from your earliest loaded file.' },
   { id: 'fees', label: 'Fees and charges', sources: ['broker'], how: 'Taken from broker files that show them. Aionion Capital charges are net value less trade value. Coins deducted are valued at their FIFO cost. Network fees are entered on each transfer.' },
   { id: 'earn', label: 'Crypto Earn contracts and rewards', sources: ['broker', 'coingecko'], how: 'Contracts and rates from your Zebpay files. Coins locked in Earn still count as holdings. Earnings in rupees are valued at today\'s price, not the price when credited.' },
   { id: 'yieldOnCost', label: 'Dividend yield on cost', sources: ['yahoo', 'app'], how: 'On summaries and grids: dividends in the last 12 months divided by the cost of what you hold now. In the Dividend report: dividends in the period divided by the amount invested up to its end, net of shares sold by then.' },
