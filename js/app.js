@@ -6,7 +6,7 @@ import { CONFIG, VERSION } from './config.js';
 import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } from './sections.js';
 import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
-import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanNote as cleanPortfolioNote } from './portfolio.js';
+import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote as cleanPortfolioNote } from './portfolio.js';
 import { initPortfolio, disclosureView, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTileText, portfolioChanged } from './portfolio-view.js';
 
 const TRASH_DAYS = 30;
@@ -38,6 +38,8 @@ const S = {
   portfolioActions: [],
   portfolioNotes: [],
   earnContracts: [],
+  transfers: [],
+  brokerFees: [],
   market: [],
   open: new Set(ls.get('open', [])),
   route: null,
@@ -228,6 +230,8 @@ const snapshot = () => ({
   portfolioActions: S.portfolioActions,
   portfolioNotes: S.portfolioNotes,
   earnContracts: S.earnContracts,
+  transfers: S.transfers,
+  brokerFees: S.brokerFees,
 });
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -291,7 +295,7 @@ async function importData(data) {
   await db.putMany('notebooks', nbChanged);
   await db.putMany('notes', noteChanged);
   for (const [store, clean] of [['paymentCategories', cleanCategory], ['paymentTypes', cleanType], ['payments', cleanPayment], ['paymentRecords', cleanRecord],
-    ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote], ['earnContracts', cleanContract]]) {
+    ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote], ['earnContracts', cleanContract], ['transfers', cleanTransfer], ['brokerFees', cleanFee]]) {
     const items = (Array.isArray(data[store]) ? data[store] : []).map(clean).filter(Boolean);
     await db.putMany(store, items.map(x => merge(S[store], x, true)).filter(Boolean));
   }
@@ -355,6 +359,7 @@ function parseRoute(hash) {
     if (!p[2]) return { ...base, page: 'home' };
     if (p[2] === 'add') return { ...base, page: 'add' };
     if (p[2] === 'reports') return { ...base, page: 'reports', tab: p[3] };
+    if (p[2] === 'transfers') return { ...base, page: 'transfers' };
     if (p[2] !== 'a' || !p[3]) return null;
     if (p[4] === 'h') return { ...base, page: 'stock', id: p[3], symbol: p[5] };
     return { ...base, page: p[4] || 'account', id: p[3] };
@@ -508,7 +513,7 @@ function renderDrawer() {
 
   const payPage = ['add', 'edit', 'p'].includes(r.page) ? 'manage' : r.page;
   const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.app ? portfolioNav() : [];
-  const current = sec?.id === 'payments' ? payPage : r.page === 'reports' ? 'reports' : r.id ?? 'home';
+  const current = sec?.id === 'payments' ? payPage : r.page === 'reports' || r.page === 'transfers' ? r.page : r.id ?? 'home';
   const nav = sec?.app
     ? `<div class="section-label"><span>${esc(sec.name)}</span></div>
       <ul class="tree">${pages.map(p => `<li>${row(current === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${esc(p.name)}</span></a>`)}</li>`).join('')}</ul>`
@@ -1259,7 +1264,7 @@ async function init() {
   initPayments(helpers);
   initPortfolio(helpers);
   try {
-    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'market'];
+    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'market'];
     (await Promise.all(stores.map(db.all))).forEach((rows, i) => { S[stores[i]] = rows; });
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;

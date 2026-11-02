@@ -31,6 +31,20 @@ export function symbolMap(trades, holdings) {
 const qtyOf = lots => lots.reduce((n, l) => n + l.qty, 0);
 const costOf = lots => lots.reduce((n, l) => n + l.qty * l.price, 0);
 
+// Divides the lots a send took: what arrived comes first in FIFO order, and the
+// rest went on fees.
+export function splitTaken(taken, arrived) {
+  const kept = [], rest = [];
+  let left = arrived;
+  for (const lot of taken) {
+    const take = Math.min(lot.qty, Math.max(left, 0));
+    left -= take;
+    if (take > EPS) kept.push({ ...lot, qty: take });
+    if (lot.qty - take > EPS) rest.push({ ...lot, qty: lot.qty - take });
+  }
+  return { kept, rest, restCost: costOf(rest), restQty: qtyOf(rest), keptCost: costOf(kept) };
+}
+
 // Whole shares only, so a holding rounds down. Brokers keep the full cost through
 // a split or bonus, but in a merger the fraction leaves with its share of the
 // cost, because it is paid out in cash.
@@ -91,6 +105,13 @@ function applyAction(state, a, fractional) {
     p.lots.push({ qty: a.qty, price: a.price, date: a.date, origin: a.symbol, source });
     p.lots.sort((x, y) => x.date.localeCompare(y.date));
     log(p, { qty: a.qty, price: a.price, source, auto: !!a.auto });
+    return;
+  }
+  if (a.type === 'arrive') {
+    // Coins from a linked transfer keep the date and cost they were bought at.
+    p.lots.push(...a.lots.map(l => ({ ...l, source: a.source })));
+    p.lots.sort((x, y) => x.date.localeCompare(y.date));
+    log(p, { qty: qtyOf(a.lots), source: a.source });
     return;
   }
   if (a.type === 'adjust') {
@@ -164,9 +185,11 @@ function settleDay(p, date, trades) {
     p.events.push({ kind: 'buy', date, qty: t.qty, price: t.price, exchange: t.exchange, origin: t.origin, tradeId: t.id, manual: t.manual, intraday: t.qty - left, source: t.note || undefined });
   }
   // Coins sent elsewhere or paid as fees leave with their cost, and aren't a sale.
+  // `taken` keeps the lots, so a linked transfer can carry them to the other account.
   for (const t of trades.filter(x => x.side === 'out')) {
-    takeFifo(p, t.qty);
-    p.events.push({ kind: 'out', date, qty: -t.qty, origin: t.origin, source: t.note || undefined, tradeId: t.id });
+    const taken = [];
+    takeFifo(p, t.qty, (lot, take) => taken.push({ ...lot, qty: take }));
+    p.events.push({ kind: 'out', date, qty: -t.qty, origin: t.origin, source: t.note || undefined, tradeId: t.id, manual: t.manual, taken });
   }
   for (const s of sells) {
     const short = takeFifo(p, s.left, (lot, take) => {
@@ -433,6 +456,22 @@ export function cleanContract(x) {
     id: text(x.id, 200), accountId: x.accountId, coin: text(x.coin, 20), contract: text(x.contract, 60), start: x.start,
     maturity: isDate(x.maturity) ? x.maturity : '', rate: text(x.rate, 20), tenure: text(x.tenure, 20), principal: finite(x.principal),
     earned: finite(x.earned), status: text(x.status, 40), updatedAt: finite(x.updatedAt, Date.now()),
+  };
+}
+
+export function cleanTransfer(x) {
+  if (typeof x?.id !== 'string' || typeof x.tradeId !== 'string' || !isId(x.fromAccountId) || !x.coin || !isDate(x.date)) return null;
+  return {
+    id: text(x.id, 340), tradeId: text(x.tradeId, 300), coin: text(x.coin, 20), date: x.date, fromAccountId: x.fromAccountId,
+    toAccountId: isId(x.toAccountId) ? x.toAccountId : '', received: finite(x.received), networkFee: finite(x.networkFee), note: text(x.note), updatedAt: finite(x.updatedAt, Date.now()),
+  };
+}
+
+export function cleanFee(x) {
+  if (typeof x?.id !== 'string' || !isId(x.accountId) || !isDate(x.date) || !x.kind) return null;
+  return {
+    id: text(x.id, 400), accountId: x.accountId, date: x.date, kind: text(x.kind, 40), coin: text(x.coin, 20), qty: finite(x.qty),
+    amount: finite(x.amount), tradeId: text(x.tradeId, 300), updatedAt: finite(x.updatedAt, Date.now()),
   };
 }
 

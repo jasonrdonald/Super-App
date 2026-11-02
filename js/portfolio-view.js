@@ -1,7 +1,7 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
-import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanNote, cleanMarket } from './portfolio.js';
+import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
 import { stockQuotes, usQuotes, usdInr, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
@@ -10,7 +10,7 @@ import { SOURCES, DATA_POINTS } from './disclosures.js';
 import { GROUPINGS, bandOf, orderBands } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
-const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Nippon MF', 'Aionion Capital', 'Zebpay', 'Blockchain Wallet', 'Other'];
+const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Nippon MF', 'Aionion Capital', 'Zebpay', 'Blockchain Wallet', 'Coinbase Wallet', 'Other'];
 const FX_KEY = 'FX:USDINR';
 const US_PREFIX = 'US:';
 const CRYPTO_PREFIX = 'CR:';
@@ -113,7 +113,7 @@ const GROUPS = ['Stocks', 'ETFs', 'Mutual funds', 'Crypto'];
 
 const EVENT_LABEL = {
   buy: 'Bought', sell: 'Sold', split: 'Split', bonus: 'Bonus', merger: 'Merger', rename: 'Renamed',
-  demerger: 'Demerger', dividend: 'Dividend', adjust: 'Broker adjustment', allot: 'Allotment', out: 'Moved out',
+  demerger: 'Demerger', dividend: 'Dividend', adjust: 'Broker adjustment', allot: 'Allotment', out: 'Moved out', arrive: 'Transferred in',
 };
 
 const ACTION_KINDS = new Set(['split', 'bonus', 'merger', 'rename', 'demerger', 'allot', 'adjust']);
@@ -126,6 +126,7 @@ let A;
 export function initPortfolio(helpers) { A = helpers; }
 
 const cache = new Map();
+const building = new Set();
 const invalidate = () => cache.clear();
 
 const accountById = id => A.S.brokerAccounts.find(a => a.id === id);
@@ -182,6 +183,26 @@ function lockedLine(account, symbol) {
   return list.map(c => `Locked in Earn: ${qtyText(c.principal)} ${c.coin} until ${day(c.maturity)} at ${c.rate}`).join(' · ');
 }
 
+/* ---------- transfers ---------- */
+
+// A send stays a plain removal until it's linked to the account that received
+// the coins. Then those coins arrive there with their original dates and cost.
+const sends = () => A.S.trades.filter(t => t.side === 'out' && /^Sent/.test(t.note));
+const transferOf = tradeId => A.S.transfers.find(x => x.tradeId === tradeId);
+const coinsFeeOn = tradeId => A.S.brokerFees.filter(f => f.tradeId === tradeId).reduce((n, f) => n + f.qty, 0);
+const outEvent = (accountId, coin, tradeId) => computed(accountById(accountId)).positions.get(coin)?.events.find(e => e.kind === 'out' && e.tradeId === tradeId);
+
+function arrivals(account) {
+  return A.S.transfers.filter(x => x.toAccountId === account.id && x.received > 0).flatMap(x => {
+    const from = accountById(x.fromAccountId);
+    // Coins sent back and forth can't be worked out from each other, so that link waits.
+    if (!from || building.has(from.id)) return [];
+    const sent = outEvent(from.id, x.coin, x.tradeId);
+    if (!sent) return [];
+    return [{ type: 'arrive', symbol: x.coin, date: x.date, lots: splitTaken(sent.taken, x.received).kept, source: `Transferred from ${from.name} on ${day(x.date)}` }];
+  });
+}
+
 function quoteFor(symbol, rows, market) {
   const m = market.find(x => x.symbol === symbol);
   if (m?.price != null) return m;
@@ -203,6 +224,7 @@ function grouper(account, rows, trades) {
 
 function computed(account) {
   if (cache.has(account.id)) return cache.get(account.id);
+  building.add(account.id);
   const file = holdingsOf(account.id);
   const rows = file?.rows ?? [];
   const trades = A.S.trades.filter(t => t.accountId === account.id);
@@ -212,7 +234,7 @@ function computed(account) {
     trades,
     holdings: rows,
     market,
-    own: A.S.portfolioActions.filter(a => a.accountId === account.id),
+    own: [...A.S.portfolioActions.filter(a => a.accountId === account.id), ...arrivals(account)],
     fractional: isUsd(account),
   });
   const lines = [...positions.values()]
@@ -244,6 +266,7 @@ function computed(account) {
     recon: rows.length ? reconcile(positions, rows) : null,
   };
   cache.set(account.id, result);
+  building.delete(account.id);
   return result;
 }
 
@@ -274,11 +297,12 @@ export function portfolioTotal() {
 export const portfolioNav = () => [
   { id: 'home', name: 'Overview', icon: 'pie', href: HOME },
   { id: 'reports', name: 'Reports', icon: 'file', href: `${HOME}/reports` },
+  { id: 'transfers', name: 'Transfers', icon: 'swap', href: `${HOME}/transfers` },
   ...accounts().map(a => ({ id: a.id, name: a.name, icon: a.kind === 'crypto' ? 'cloud' : a.kind === 'mf' ? 'chart' : 'card', href: accountPath(a.id) })),
 ];
 
 export function portfolioRouteValid(r) {
-  if (r.page === 'home' || r.page === 'add' || r.page === 'reports') return true;
+  if (['home', 'add', 'reports', 'transfers'].includes(r.page)) return true;
   if (!accountById(r.id)) return false;
   if (r.page === 'stock') return !!computed(accountById(r.id)).positions.get(r.symbol);
   return ['account', 'reconcile', 'trade'].includes(r.page);
@@ -485,6 +509,8 @@ export const portfolioBackupText = () => JSON.stringify({
   portfolioActions: A.S.portfolioActions,
   portfolioNotes: A.S.portfolioNotes,
   earnContracts: A.S.earnContracts,
+  transfers: A.S.transfers,
+  brokerFees: A.S.brokerFees,
   market: A.S.market,
 }, null, 1);
 
@@ -511,7 +537,7 @@ async function saveBackup() {
 
 // Market data stays: it is public, and slow to load again.
 async function clearBrokers() {
-  for (const store of ['brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts']) {
+  for (const store of ['brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees']) {
     await db.clear(store);
     A.S[store] = [];
   }
@@ -561,6 +587,8 @@ async function restoreBackup(file) {
   await merge('portfolioActions', rows('portfolioActions', cleanAdjustment).filter(a => ids.has(a.accountId)), 'id', edited);
   await merge('portfolioNotes', rows('portfolioNotes', cleanNote).filter(n => ids.has(n.accountId)), 'id', edited);
   await merge('earnContracts', rows('earnContracts', cleanContract).filter(c => ids.has(c.accountId)), 'id', edited);
+  await merge('transfers', rows('transfers', cleanTransfer).filter(x => ids.has(x.fromAccountId)), 'id', edited);
+  await merge('brokerFees', rows('brokerFees', cleanFee).filter(f => ids.has(f.accountId)), 'id', edited);
   await merge('market', rows('market', cleanMarket), 'symbol', m => Math.max(m.eventsAt ?? 0, m.quotedAt ?? 0));
   A.markDirty();
   invalidate();
@@ -582,7 +610,7 @@ function bindRestore() {
 
 function homeView(r) {
   const list = accounts();
-  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a>` : ''}`;
+  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a><a class="btn sm" href="${HOME}/transfers">${icon('swap')}<span>Transfers</span></a>` : ''}`;
   const body = list.length
     ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
@@ -628,7 +656,7 @@ function addView() {
   form.elements.broker.addEventListener('change', e => {
     form.elements.currency.value = e.target.value === 'Vested' ? 'USD' : 'INR';
     if (e.target.value === 'Nippon MF') form.elements.kind.value = 'mf';
-    if (e.target.value === 'Zebpay' || e.target.value === 'Blockchain Wallet') form.elements.kind.value = 'crypto';
+    if (['Zebpay', 'Blockchain Wallet', 'Coinbase Wallet'].includes(e.target.value)) form.elements.kind.value = 'crypto';
   });
   form.addEventListener('submit', async e => {
     e.preventDefault();
@@ -710,12 +738,13 @@ async function loadFiles(account, files) {
   }
   account.clientId ||= [...ids][0] ?? '';
   const known = new Set(A.S.trades.filter(t => t.accountId === account.id).map(t => t.id));
+  const tradeKey = t => `${account.id}:${t.symbol}:${t.date}:${t.exchange}:${t.tradeId}`;
   const fresh = [];
   let skipped = 0;
   for (const p of parsed) {
     skipped += p.skipped ?? 0;
     for (const t of p.trades ?? []) {
-      const id = `${account.id}:${t.symbol}:${t.date}:${t.exchange}:${t.tradeId}`;
+      const id = tradeKey(t);
       if (known.has(id)) continue;
       known.add(id);
       fresh.push({ ...t, id, accountId: account.id, updatedAt: Date.now() });
@@ -728,6 +757,13 @@ async function loadFiles(account, files) {
   const newIds = new Set(contracts.map(c => c.id));
   A.S.earnContracts = [...A.S.earnContracts.filter(c => !newIds.has(c.id)), ...contracts];
   await db.putMany('earnContracts', contracts);
+  // Fees are kept by their row, so loading a file again updates rather than repeats.
+  const fees = parsed.flatMap(p => p.fees ?? []).map(({ key, trade, ...f }) => ({
+    coin: '', qty: 0, amount: 0, ...f, id: `${account.id}:${key}:${f.kind}`, accountId: account.id, tradeId: trade ? tradeKey(trade) : '', updatedAt: Date.now(),
+  }));
+  const feeIds = new Set(fees.map(f => f.id));
+  A.S.brokerFees = [...A.S.brokerFees.filter(f => !feeIds.has(f.id)), ...fees];
+  await db.putMany('brokerFees', fees);
   const statements = parsed.filter(p => p.kind === 'holdings').sort((a, b) => a.asOf.localeCompare(b.asOf));
   const latest = statements.at(-1);
   if (latest && latest.asOf >= (holdingsOf(account.id)?.asOf ?? '')) {
@@ -855,6 +891,7 @@ function accountView(r) {
         <button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>
       </div>
       <div id="pf-table">${holdingsTable(account, c)}</div>
+      ${feesPanel(account, c)}
     </div></div>
     <a class="fab" href="${accountPath(account.id)}/trade" aria-label="Add transaction">${icon('plus')}</a>`;
 
@@ -931,7 +968,7 @@ export function disclosureView() {
 /* ---------- reports ---------- */
 
 const R = { broker: 'all', year: 'all' };
-const REPORTS = { dividends: 'Dividends', gains: 'Capital gains', earn: 'Crypto earnings' };
+const REPORTS = { dividends: 'Dividends', gains: 'Capital gains', earn: 'Crypto earnings', fees: 'Fees' };
 
 // Indian financial years run April to March, named by the year they start.
 const fyStart = date => Number(date.slice(0, 4)) - (date.slice(5, 7) < '04' ? 1 : 0);
@@ -1157,9 +1194,146 @@ function earnReport() {
     <p class="muted small">Coins locked in Earn stay in your holdings. Interest on active contracts is what has accrued so far. Rupee values use today's price, not the price when credited, so this isn't a tax figure.</p>`;
 }
 
+/* ---------- fees ---------- */
+
+const coinText = v => (isPrivate() ? MASK : v ? v.toFixed(8).replace(/0+$/, '').replace(/\.$/, '') : '–');
+const TRADING_FEES = ['Trading fee', 'Commission', 'Brokerage', 'Brokerage and charges', 'Exchange charges', 'Other charges'];
+const TAXES = ['GST', 'TDS', 'STT', 'Stamp duty'];
+
+// What coins taken as a fee had cost you, from the lots that left with them.
+function feeCost(f) {
+  if (!f.coin) return f.amount;
+  const sent = outEvent(f.accountId, f.coin, f.tradeId);
+  if (!sent) return 0;
+  const link = transferOf(f.tradeId);
+  const { restCost, restQty } = splitTaken(sent.taken, link ? link.received : -sent.qty - coinsFeeOn(f.tradeId));
+  return restQty ? restCost * f.qty / restQty : 0;
+}
+
+// Network fees come from the transfers, and sit inside the withdrawal fee, so
+// they're shown but not added to the totals.
+function feeRows(brokers) {
+  return brokers.flatMap(({ account, rate }) => {
+    const charged = A.S.brokerFees.filter(f => f.accountId === account.id).map(f => ({ ...f, account, cost: feeCost(f) * rate }));
+    const network = A.S.transfers.filter(x => x.fromAccountId === account.id && x.networkFee > 0).map(x => {
+      const sent = outEvent(account.id, x.coin, x.tradeId);
+      const unit = sent?.taken.length ? splitTaken(sent.taken, -sent.qty).keptCost / -sent.qty : 0;
+      return { date: x.date, kind: 'Network fee', coin: x.coin, qty: x.networkFee, amount: 0, account, cost: x.networkFee * unit * rate, inside: true };
+    });
+    return [...charged, ...network];
+  });
+}
+
+function feeTable(rows) {
+  const kinds = new Map();
+  for (const f of rows) {
+    const row = kinds.get(f.kind) ?? { n: 0, cost: 0, coins: new Map(), inside: f.inside };
+    row.n++;
+    row.cost += f.cost;
+    if (f.coin) row.coins.set(f.coin, (row.coins.get(f.coin) ?? 0) + f.qty);
+    kinds.set(f.kind, row);
+  }
+  return `<div class="holdings-wrap"><table class="holdings lots">
+    <thead><tr><th>Type</th><th class="num">Entries</th><th>Coins deducted</th><th class="num">Amount</th></tr></thead>
+    <tbody>${[...kinds].sort((a, b) => b[1].cost - a[1].cost).map(([kind, k]) => `<tr><td>${A.esc(kind)}${k.inside ? ' (inside withdrawal fees)' : ''}</td><td class="num">${k.n}</td><td>${[...k.coins].map(([c, q]) => `${coinText(q)} ${A.esc(c)}`).join(', ') || '–'}</td><td class="num">${money(k.cost)}</td></tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function feesPanel(account, c) {
+  const rows = feeRows([{ account, c, rate: 1 }]);
+  if (!rows.length) return '';
+  const total = rows.filter(f => !f.inside).reduce((n, f) => n + f.cost, 0);
+  return `<section class="panel"><div class="panel-head"><h2>Fees and charges: ${money(total)}</h2><button class="btn sm" data-act="pf-fees" data-id="${account.id}">${icon('file')}<span>Report</span></button></div>${feeTable(rows)}</section>`;
+}
+
+function feesReport() {
+  const brokers = reportBrokers();
+  const all = feeRows(brokers);
+  const filters = reportFilters([...new Set(all.map(f => fyStart(f.date)))].sort((a, b) => b - a));
+  const rows = all.filter(f => inYear(f.date));
+  const charged = rows.filter(f => !f.inside);
+  const sum = test => charged.filter(test).reduce((n, f) => n + f.cost, 0);
+  const missing = brokers.filter(b => !all.some(f => f.account.id === b.account.id) && !/Wallet/.test(b.account.broker)).map(b => b.account.name);
+  const network = rows.filter(f => f.inside);
+  const taken = charged.filter(f => f.coin);
+  return `${filters}
+    <div class="stats">
+      ${stat(`Total fees${info('fees')}`, money(sum(() => true)), `${charged.length} ${charged.length === 1 ? 'entry' : 'entries'}`)}
+      ${stat('Trading fees', money(sum(f => TRADING_FEES.includes(f.kind))), 'Brokerage and exchange fees')}
+      ${stat('Taxes', money(sum(f => !f.coin && TAXES.includes(f.kind))), 'GST, STT, stamp duty and TDS')}
+      ${stat('Bank charges', money(sum(f => f.kind === 'Bank charge')), 'Deposits and withdrawals')}
+      ${stat('Coins deducted', money(sum(f => !!f.coin)), `${A.plural(taken.length, 'deduction')}, at what they cost you`)}
+      ${stat('Network fees', money(network.reduce((n, f) => n + f.cost, 0)), 'Inside withdrawal fees, not added again')}
+    </div>
+    ${!rows.length ? `<div class="empty">${icon('file')}<p>No fees for this selection.</p></div>` : `<section class="panel"><h2>By type</h2>${feeTable(rows)}</section>${!detailed() ? '' : `<section class="panel"><h2>Entries (${rows.length})</h2><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Date</th><th>Broker</th><th>Type</th><th>Coins</th><th class="num">Amount</th></tr></thead>
+      <tbody>${[...rows].sort((a, b) => b.date.localeCompare(a.date)).map(f => `<tr><td>${day(f.date)}</td><td>${A.esc(f.account.name)}</td><td>${A.esc(f.kind)}</td><td>${f.coin ? `${coinText(f.qty)} ${A.esc(f.coin)}` : '–'}</td><td class="num">${money(f.cost)}</td></tr>`).join('')}</tbody>
+    </table></div></section>`}`}
+    <p class="muted small">Zebpay, Vested and Aionion Capital fees are already in your cost per share, while HDFC Securities costs use the market price, without them. Coins deducted are valued at what they cost you.${missing.length ? ` ${A.esc(missing.join(' and '))} files don't show charges, so they aren't included.` : ''}</p>`;
+}
+
+/* ---------- transfers page ---------- */
+
+function transfersView() {
+  const rows = sends().sort((a, b) => b.date.localeCompare(a.date)).map(t => {
+    const link = transferOf(t.id);
+    const fee = coinsFeeOn(t.id);
+    const arrived = link ? link.received : t.qty - fee;
+    const sent = outEvent(t.accountId, t.symbol, t.id);
+    return { t, link, fee, arrived, gap: t.qty - fee - arrived, cost: splitTaken(sent?.taken ?? [], arrived).keptCost, from: accountById(t.accountId), to: link && accountById(link.toAccountId) };
+  });
+  const open = rows.filter(r => !r.link);
+  const inbound = A.S.trades.filter(t => t.side === 'buy' && t.note === 'Received').sort((a, b) => b.date.localeCompare(a.date));
+  const moved = A.S.portfolioActions.filter(a => a.type === 'allot' && a.issue === 'transfer').sort((a, b) => b.date.localeCompare(a.date));
+  const place = r => (r.to ? `<a href="${accountPath(r.to.id)}">${A.esc(r.to.name)}</a>` : r.link ? 'Left your portfolio' : '<span class="down">Not linked</span>');
+  A.view.innerHTML = `${hero('Transfers', 'Coins and shares moved between accounts', HOME)}
+    <div class="scroll"><div class="pay-page pf-page">
+      <div class="stats">
+        ${stat('Transfers out', String(rows.length), `${rows.filter(r => r.to).length} now in another account`)}
+        ${stat('Not linked', String(open.length), open.length ? 'These coins are missing from holdings' : 'All accounted for', open.length ? 'down' : '')}
+        ${stat('Cost moved', money(rows.filter(r => r.to).reduce((n, r) => n + r.cost, 0)), 'At the original buy cost')}
+      </div>
+      ${open.length ? `<div class="banner">${icon('alert')}<span>Link each send to the account that received it, and the coins appear there with their original dates and cost.</span></div>` : ''}
+      <section class="panel"><h2>Sent out (${rows.length})</h2>${rows.length ? `<div class="holdings-wrap"><table class="holdings lots">
+        <thead><tr><th>Date</th><th>Coin</th><th>From</th><th>Now in</th><th class="num">Sent</th><th class="num">Fee taken</th><th class="num">Network fee</th><th class="num">Received</th><th class="num">Cost moved</th><th></th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${day(r.t.date)}</td><td>${A.esc(r.t.symbol)}</td><td>${A.esc(r.from.name)}</td><td>${place(r)}</td><td class="num">${coinText(r.t.qty)}</td><td class="num">${coinText(r.fee)}</td><td class="num">${coinText(r.link?.networkFee ?? 0)}</td><td class="num">${coinText(r.arrived)}</td><td class="num">${money(r.cost)}</td>
+          <td><button class="btn sm" data-act="pf-link" data-id="${A.esc(r.t.id)}">${r.link ? 'Edit' : 'Link'}</button>${r.link ? ` <button class="btn sm" data-act="pf-unlink" data-id="${A.esc(r.link.id)}">Unlink</button>` : ''}</td></tr>
+          ${r.link?.note || Math.abs(r.gap) > 1e-9 ? `<tr class="lot-note"><td colspan="10">${[r.link?.note, Math.abs(r.gap) > 1e-9 ? `Sent less fee differs from received by ${coinText(Math.abs(r.gap))} ${r.t.symbol}` : ''].filter(Boolean).map(A.esc).join(' · ')}</td></tr>` : ''}`).join('')}</tbody>
+      </table></div>` : '<p class="muted">No coins sent out.</p>'}</section>
+      ${inbound.length ? `<section class="panel"><h2>Received from outside (${inbound.length})</h2><div class="holdings-wrap"><table class="holdings lots">
+        <thead><tr><th>Date</th><th>Coin</th><th>Into</th><th class="num">Received</th></tr></thead>
+        <tbody>${inbound.map(t => `<tr><td>${day(t.date)}</td><td>${A.esc(t.symbol)}</td><td>${A.esc(accountById(t.accountId)?.name ?? '')}</td><td class="num">${coinText(t.qty)}</td></tr>`).join('')}</tbody>
+      </table></div></section>` : ''}
+      ${moved.length ? `<section class="panel"><h2>Broker transfers (${moved.length})</h2><div class="holdings-wrap"><table class="holdings lots">
+        <thead><tr><th>Date</th><th>Holding</th><th>Account</th><th>Direction</th><th>Other broker</th><th class="num">Shares</th><th class="num">Cost per share</th></tr></thead>
+        <tbody>${moved.map(a => `<tr><td>${day(a.date)}</td><td>${A.esc(a.symbol)}</td><td>${A.esc(accountById(a.accountId)?.name ?? '')}</td><td>${a.direction === 'out' ? 'Out' : 'In'}</td><td>${A.esc(a.party || '–')}</td><td class="num">${qtyText(a.qty)}</td><td class="num">${money(a.price)}</td></tr>`).join('')}</tbody>
+      </table></div></section>` : ''}
+    </div></div>`;
+}
+
+async function linkTransfer(tradeId) {
+  const t = A.S.trades.find(x => x.id === tradeId);
+  const from = accountById(t.accountId);
+  const cur = transferOf(tradeId);
+  const choices = accounts().filter(a => a.id !== from.id && a.kind === from.kind);
+  const received = cur?.received ?? +(t.qty - coinsFeeOn(tradeId)).toFixed(8);
+  const v = await formDialog(`${t.symbol} sent on ${day(t.date)}`, `
+    <label class="f"><span>Received in</span><select name="to">${choices.map(a => `<option value="${a.id}"${a.id === cur?.toAccountId ? ' selected' : ''}>${A.esc(a.name)}</option>`).join('')}<option value=""${cur && !cur.toAccountId ? ' selected' : ''}>Left my portfolio</option></select></label>
+    ${number('received', 'Coins received', received)}
+    <label class="f"><span>Network fee, in coins</span><input name="networkFee" type="number" min="0" step="any" value="${cur?.networkFee || ''}"></label>
+    <label class="f"><span>Comment</span><input name="note" maxlength="200" value="${A.esc(cur?.note ?? '')}"></label>`, 'Save');
+  if (!v) return;
+  const rec = { id: `tr:${t.id}`, tradeId: t.id, coin: t.symbol, date: t.date, fromAccountId: from.id, toAccountId: v.to, received: Number(v.received), networkFee: Number(v.networkFee) || 0, note: v.note.trim(), updatedAt: Date.now() };
+  A.S.transfers = [...A.S.transfers.filter(x => x.id !== rec.id), rec];
+  await A.persist('transfers', rec);
+  invalidate();
+  A.refresh();
+  refreshMarket();
+}
+
 function reportsView(r) {
   const tab = REPORTS[r.tab] ? r.tab : 'dividends';
-  const body = tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : dividendReport();
+  const body = tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : dividendReport();
   A.view.innerHTML = `
     ${hero('Reports', REPORTS[tab], HOME)}
     <div class="seg tabs" role="group" aria-label="Report">
@@ -1491,7 +1665,7 @@ function tradeView(r) {
     <header class="topbar">${A.upButton(back)}<div class="titles"><h1>Add transaction</h1><p>${A.esc(account.name)}</p></div>${A.menuButton}</header>
     <div class="scroll"><form class="pay-form" id="pf-trade" novalidate>
       <label class="f wide"><span>${account.kind === 'mf' ? 'Fund name' : account.kind === 'crypto' ? 'Coin symbol' : 'Symbol'}</span><input name="symbol" required maxlength="120" placeholder="${account.kind === 'mf' ? 'e.g. Parag Parikh Flexi Cap Fund - Direct Plan' : account.kind === 'crypto' ? 'e.g. BTC' : 'e.g. INFY'}" autocomplete="off"></label>
-      <label class="f"><span>Type</span><select name="side"><option value="buy">Buy</option><option value="sell">Sell</option></select></label>
+      <label class="f"><span>Type</span><select name="side"><option value="buy">Buy</option><option value="sell">Sell</option>${account.kind === 'crypto' ? '<option value="out">Sent out</option>' : ''}</select></label>
       <label class="f"><span>Date</span><input name="date" type="date" required max="${today}" value="${today}"></label>
       <label class="f"><span>Quantity</span><input name="qty" type="number" inputmode="decimal" min="0.00000001" step="any" required></label>
       <label class="f"><span>Price per unit</span><input name="price" type="number" inputmode="decimal" min="0" step="any" required></label>
@@ -1499,6 +1673,7 @@ function tradeView(r) {
       <div class="f-actions wide"><button class="btn primary" type="submit">Add transaction</button><a class="btn ghost" href="${back}">Cancel</a></div>
     </form></div>`;
   const form = A.$('#pf-trade');
+  form.elements.side.addEventListener('change', e => { form.elements.price.required = e.target.value !== 'out'; });
   form.addEventListener('submit', async e => {
     e.preventDefault();
     if (!form.reportValidity()) return;
@@ -1507,7 +1682,7 @@ function tradeView(r) {
     if (!symbol) return A.toast('Enter a symbol.');
     const trade = {
       id: A.uid(), accountId: account.id, manual: true, isin: '', exchange: '', series: '', tradeId: '', time: '',
-      symbol: account.kind === 'mf' ? symbol : symbol.toUpperCase(), date: d.date, side: d.side, qty: Number(d.qty), price: Number(d.price), note: d.note.trim(), updatedAt: Date.now(),
+      symbol: account.kind === 'mf' ? symbol : symbol.toUpperCase(), date: d.date, side: d.side, qty: Number(d.qty), price: Number(d.price) || 0, note: d.side === 'out' ? `Sent out${d.note.trim() ? `: ${d.note.trim()}` : ''}` : d.note.trim(), updatedAt: Date.now(),
     };
     A.S.trades.push(trade);
     await A.persist('trades', trade);
@@ -1539,6 +1714,10 @@ async function accountMenu(id) {
     for (const a of A.S.portfolioActions.filter(x => x.accountId === id)) await db.del('portfolioActions', a.id);
     for (const c of A.S.earnContracts.filter(x => x.accountId === id)) await db.del('earnContracts', c.id);
     A.S.earnContracts = A.S.earnContracts.filter(c => c.accountId !== id);
+    for (const f of A.S.brokerFees.filter(x => x.accountId === id)) await db.del('brokerFees', f.id);
+    A.S.brokerFees = A.S.brokerFees.filter(f => f.accountId !== id);
+    for (const x of A.S.transfers.filter(y => y.fromAccountId === id || y.toAccountId === id)) await db.del('transfers', x.id);
+    A.S.transfers = A.S.transfers.filter(x => x.fromAccountId !== id && x.toAccountId !== id);
     for (const n of A.S.portfolioNotes.filter(x => x.accountId === id)) await db.del('portfolioNotes', n.id);
     A.S.portfolioNotes = A.S.portfolioNotes.filter(n => n.accountId !== id);
     await db.del('brokerHoldings', id);
@@ -1565,6 +1744,16 @@ export async function portfolioAction(b) {
       A.ls.set('pfPrivate', !isPrivate());
       return A.refresh();
     case 'pf-columns': return chooseColumns();
+    case 'pf-link': return linkTransfer(id);
+    case 'pf-unlink':
+      A.S.transfers = A.S.transfers.filter(x => x.id !== id);
+      await db.del('transfers', id);
+      A.markDirty();
+      invalidate();
+      return A.refresh();
+    case 'pf-fees':
+      R.broker = id;
+      return A.go(`${HOME}/reports/fees`);
     case 'pf-note': return reviewNote(accountById(id), symbol);
     case 'pf-allot': return reconcileEntry(accountById(id), symbol, b.dataset.kind);
     case 'pf-match': {
@@ -1605,6 +1794,7 @@ export function portfolioView(r) {
   shown = (r.id && accountById(r.id)?.currency) || CONFIG.currency;
   if (r.page === 'add') addView();
   else if (r.page === 'reports') reportsView(r);
+  else if (r.page === 'transfers') transfersView();
   else if (r.page === 'account') accountView(r);
   else if (r.page === 'stock') stockView(r);
   else if (r.page === 'reconcile') reconcileView(r);

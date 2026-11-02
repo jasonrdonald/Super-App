@@ -61,10 +61,12 @@ function hdfcDate(s) {
   return `${y}-${String(MONTHS.indexOf(m.toLowerCase()) + 1).padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
+const HDFC_CHARGES = [['brok amount', 'Brokerage'], ['gst', 'GST'], ['stt', 'STT'], ['stamp duty', 'Stamp duty'], ['transaction charges', 'Exchange charges'], ['edu cess', 'Other charges'], ['other charges', 'Other charges']];
+
 function hdfcTrades(rows) {
   const head = rows.findIndex(r => key(r[0]) === 'scrip name');
   const cols = rows[head].map(key);
-  const trades = [];
+  const trades = [], fees = [];
   let skipped = 0;
   for (const r of rows.slice(head + 1)) {
     if (!r[0]) continue;
@@ -77,8 +79,12 @@ function hdfcTrades(rows) {
       symbol: String(x['scrip name']).trim(), isin: '', date, side, qty, price,
       exchange: String(x.exchange ?? ''), series: '', tradeId: String(x['trade no'] ?? ''), time: `${date}T${x['trade time']}`,
     });
+    for (const [column, kind] of HDFC_CHARGES) {
+      const amount = Number(x[column]) || 0;
+      if (amount) fees.push({ key: `${x['trade no']}-${x['scrip name']}-${date}-${side}-${x.exchange}-${column}`, date, kind, amount });
+    }
   }
-  return { trades, skipped };
+  return { trades, skipped, fees };
 }
 
 // Some orders show no units, such as an NFO. Another order for the fund within
@@ -142,7 +148,7 @@ const clock24 = t => {
 // A trade's cash amount includes commission, and the broker's average cost
 // counts it, so the price kept here is cash per share.
 function vestedTrades(rows) {
-  const trades = [];
+  const trades = [], fees = [];
   let skipped = 0;
   for (const x of headedRows(rows, 'ticker')) {
     const side = String(x.activity).toLowerCase();
@@ -151,8 +157,10 @@ function vestedTrades(rows) {
     const date = isoDate(x.date);
     const time = `${date}T${clock24(x['time in utc'])}`;
     trades.push({ symbol: String(x.ticker).trim(), isin: '', date, side, qty, price: cash / qty, kind: 'stock', exchange: 'US', series: '', tradeId: `${time}-${x.ticker}`, time });
+    const commission = Math.abs(Number(x['commission charges'])) || 0;
+    if (commission) fees.push({ key: `${time}-${x.ticker}`, date, kind: 'Commission', amount: commission });
   }
-  return { trades, skipped };
+  return { trades, skipped, fees };
 }
 
 function vestedHoldings(rows) {
@@ -192,10 +200,10 @@ function nipponTrades(rows) {
 // Credit that closes a contract only adds its interest. Coin swaps are one for
 // one and handled as renames. Addresses and fiat movements aren't kept.
 function zebpayTrades(rows) {
-  const trades = [];
+  const trades = [], fees = [];
+  const dateOf = x => { const [d, m, y] = String(x.date).split('/'); return `${y}-${m}-${d}`; };
   const add = (x, side, qty, price, note = '') => {
-    const [d, m, y] = String(x.date).split('/');
-    const date = `${y}-${m}-${d}`;
+    const date = dateOf(x);
     const coin = String(x['coin cryptopack name']).trim();
     const type = String(x['transaction type']).trim();
     trades.push({
@@ -203,25 +211,48 @@ function zebpayTrades(rows) {
       tradeId: `${x['trade id contract id']}-${type}-${coin}-${date}-${x['time utc']}-${note}`, time: `${date}T${x['time utc']}`,
     });
   };
+  // Fees on trades and bank movements are in rupees. On a send or a membership
+  // charge they are coins taken from the balance, and tied to that entry for cost.
+  const charge = (x, kind, value, coin = '') => {
+    if (!value) return;
+    const type = String(x['transaction type']).trim();
+    fees.push({
+      key: `${x['trade id contract id']}-${type}-${dateOf(x)}-${x['time utc']}`, date: dateOf(x), kind,
+      ...(coin ? { coin, qty: value, trade: trades.at(-1) } : { amount: value }),
+    });
+  };
   for (const x of headedRows(rows, 'transaction type')) {
     const coin = String(x['coin cryptopack name']).trim();
     const type = String(x['transaction type']).trim();
     const qty = Number(x.quantity);
+    const fee = Number(x.fees) || 0;
+    if (coin === 'INR') {
+      charge(x, 'Bank charge', fee);
+      charge(x, 'GST', Number(x['gst inr value']) || 0);
+    }
     if (!coin || coin === 'INR') continue;
     if (/ (buy|sell)$/i.test(type) && qty > 0) {
       // The total includes fees and GST, so cost carries them.
       const total = Number(x['total debit credit fiat']) || Number(x['trade amount']);
       add(x, /buy$/i.test(type) ? 'buy' : 'sell', qty, total / qty);
-    } else if (type === 'Send') add(x, 'out', qty, 0, 'Sent out of Zebpay');
-    else if (type === 'Membership Fees') add(x, 'out', qty, 0, 'Membership fee paid in coin');
-    else if (type === 'Receive') add(x, 'buy', qty, 0, 'Received');
+      charge(x, 'Trading fee', fee);
+      charge(x, 'GST', Number(x['gst inr value']) || 0);
+      charge(x, 'TDS', Number(x['tds inr value']) || 0);
+    } else if (type === 'Send') {
+      add(x, 'out', qty, 0, 'Sent out of Zebpay');
+      charge(x, 'Withdrawal fee', fee, coin);
+    } else if (type === 'Membership Fees') {
+      add(x, 'out', qty, 0, 'Membership fee paid in coin');
+      charge(x, 'Membership fee', fee, coin);
+      charge(x, 'GST', Number(x['gst from currency']) || 0, coin);
+    } else if (type === 'Receive') add(x, 'buy', qty, 0, 'Received');
     else if (type === 'Earning (Legacy)') add(x, 'buy', qty, 0, 'Reward');
     else if (type === 'Earning Credit' || type === 'Lending Credit') {
       const interest = Number(x['earning interest']);
       if (interest > 0) add(x, 'buy', interest, 0, 'Earn interest');
     }
   }
-  return { trades, skipped: 0 };
+  return { trades, skipped: 0, fees };
 }
 
 function zebpayContracts(rows) {
@@ -239,7 +270,7 @@ function zebpayContracts(rows) {
 // price kept is net value per share. Rows carry no trade number, so a repeat of
 // an identical fill is told apart by its place among them.
 function aionionTrades(rows) {
-  const trades = [];
+  const trades = [], fees = [];
   const seen = new Map();
   let skipped = 0;
   for (const x of headedRows(rows, 'symbol')) {
@@ -256,8 +287,11 @@ function aionionTrades(rows) {
       symbol: String(x.symbol).trim(), isin: String(x.isin ?? '').trim(), date, side, qty, price: net / qty, kind: 'stock',
       exchange: '', series: '', tradeId: `${fill}-${repeat}`, time: `${date}T12:00:00`,
     });
+    // The statement has no charges column, but net value differs from the trade value by them.
+    const charges = Math.abs(Math.abs(net) - qty * Number(x.price));
+    if (charges >= 0.005) fees.push({ key: `${fill}-${repeat}`, date, kind: 'Brokerage and charges', amount: charges });
   }
-  return { trades, skipped };
+  return { trades, skipped, fees };
 }
 
 function aionionHoldings(rows) {

@@ -1,5 +1,5 @@
 // Offline app shell. Bump VERSION when shipping changes so clients update.
-const VERSION = 'v1.13.1';
+const VERSION = 'v1.14.0';
 const CACHE = `notes-${VERSION}`;
 const ASSETS = [
   './',

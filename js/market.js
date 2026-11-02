@@ -216,6 +216,9 @@ const COINS = {
   LTC: ['litecoin', 'Litecoin'], BCH: ['bitcoin-cash', 'Bitcoin Cash'], TRX: ['tron', 'TRON'], BNB: ['binancecoin', 'BNB'],
   USDT: ['tether', 'Tether'], POL: ['polygon-ecosystem-token', 'Polygon'], MANA: ['decentraland', 'Decentraland'],
   BAT: ['basic-attention-token', 'Basic Attention Token'], A: ['vaulta', 'Vaulta (was EOS)'], IQ: ['everipedia', 'IQ'],
+  OMG: ['omisego', 'OMG Network'],
+  // The old token no longer trades, and searching for it finds an unrelated coin.
+  GNT: ['', 'Golem, old GNT token'],
 };
 
 export async function cryptoQuotes(symbols, currency = 'inr') {
@@ -223,6 +226,7 @@ export async function cryptoQuotes(symbols, currency = 'inr') {
   const ids = new Map();
   for (const symbol of symbols) {
     const known = COINS[symbol.toUpperCase()];
+    if (known && !known[0]) { quotes.set(symbol, { price: null, changePct: null, change: null, name: known[1] }); continue; }
     if (known) { ids.set(known[0], symbol); continue; }
     const res = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(symbol)}`, { signal: timed() }).catch(() => null);
     const coin = res?.ok ? (await res.json()).coins?.find(c => c.symbol.toUpperCase() === symbol.toUpperCase()) : null;
