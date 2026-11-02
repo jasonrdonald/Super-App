@@ -511,6 +511,7 @@ th.num .pf-th { justify-content: flex-end; }
 .lots thead th { padding: 8px 10px; font-size: .76rem; color: var(--muted); }
 .holdings th[scope="row"], .holdings thead th:first-child { position: sticky; left: 0; z-index: 1; border-right: 1px solid var(--border); }
 .holdings thead th:first-child { z-index: 2; }
+.holdings.pf-summary thead th { padding: 8px 10px; }
 .lots th:first-child { position: static; border-right: 0; }
 .holdings th[scope="row"] a {
   display: block; max-width: 150px; overflow: hidden; text-overflow: ellipsis;

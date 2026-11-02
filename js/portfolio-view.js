@@ -867,15 +867,39 @@ function rowsToShow(c) {
 function holdingsTable(account, c) {
   const rows = rowsToShow(c);
   if (!rows.length) return `<div class="empty">${icon('card')}<p>${V.q ? 'No holdings match.' : 'No holdings here. Load a tradebook or add a transaction.'}</p></div>`;
+  return bucketsOf(rows)
+    .map(([g, list]) => `<section class="pf-group"><h2>${A.esc(g)} (${list.length})</h2>${groupTable(account, list)}</section>`)
+    .join('');
+}
+
+function bucketsOf(rows) {
   const key = groupKey();
   const names = key === 'asset'
     ? GROUPS.filter(g => rows.some(r => r.group === g))
     : orderBands(key, new Set(rows.map(r => bandOf(key, r))));
   const inGroup = key === 'asset' ? (r, g) => r.group === g : (r, g) => bandOf(key, r) === g;
-  return names
-    .map(g => [g, rows.filter(r => inGroup(r, g))])
-    .map(([g, list]) => `<section class="pf-group"><h2>${A.esc(g)} (${list.length})</h2>${groupTable(account, list)}</section>`)
-    .join('');
+  return names.map(g => [g, rows.filter(r => inGroup(r, g))]);
+}
+
+// One line a bucket. Sold holdings count too, so the total ties to the cards above.
+function summaryTable(c) {
+  const rows = linesInView(c);
+  if (!rows.length) return `<div class="empty">${icon('card')}<p>No holdings here.</p></div>`;
+  const all = summarizeAll(rows);
+  const line = (s, list) => `<td class="num">${list.filter(l => l.qty > EPS).length}</td>
+    <td class="num">${money(s.cost)}</td>
+    <td class="num">${money(s.value)}</td>
+    <td class="num">${all.value ? plainPct(s.value / all.value * 100) : '–'}</td>
+    <td class="num ${tone(s.dayGain)}">${money(s.dayGain, true)}<small>${pct(s.dayPct)}</small></td>
+    <td class="num ${tone(s.gain)}">${money(s.gain, true)}<small>${pct(s.gainPct)}</small></td>
+    <td class="num ${tone(s.xirr)}">${pct(s.xirr)}</td>
+    <td class="num">${money(s.dividends)}</td>
+    <td class="num ${tone(s.realized)}">${money(s.realized, true)}<small>${pct(s.realizedPct)}</small></td>`;
+  return `<div class="holdings-wrap"><table class="holdings pf-summary">
+    <thead><tr><th>${A.esc(GROUPINGS[groupKey()].label)}</th>${['Holdings', 'Invested', 'Market value', 'Share', 'Day gain', 'Total gain', 'XIRR', 'Dividends', 'Realized gain'].map(h => `<th class="num">${h}</th>`).join('')}</tr></thead>
+    <tbody>${bucketsOf(rows).map(([g, list]) => `<tr><th scope="row">${A.esc(g)}</th>${line(summarizeAll(list), list)}</tr>`).join('')}</tbody>
+    <tfoot><tr><th scope="row">Total</th>${line(all, rows)}</tr></tfoot>
+  </table></div>`;
 }
 
 const groupKey = () => {
@@ -922,7 +946,7 @@ function reconChip(account, c) {
 }
 
 // The holdings page shared by each broker and the consolidated view, where account is null.
-function holdingsBody(account, c, { filter = '', notes = '', tools = '' }) {
+function holdingsBody(account, c, { filter = '', notes = '', tools = '', summary = false }) {
   const tabs = Object.entries(ASSETS).filter(([, a]) => c.lines.some(l => a.groups.includes(l.group)));
   if (!tabs.some(([k]) => k === V.asset)) V.asset = 'all';
   if (!columns().some(col => col.key === V.sort)) V.sort = 'value';
@@ -938,28 +962,29 @@ function holdingsBody(account, c, { filter = '', notes = '', tools = '' }) {
       <div class="status" id="pf-status">${statusLine()}</div>
       ${notes}
       <div class="period">
-        <div class="seg" role="group" aria-label="Which holdings">
+        ${summary ? '' : `<div class="seg" role="group" aria-label="Which holdings">
           ${[['current', `Current (${open})`], ['sold', `Sold (${sold})`], ['all', 'All']].map(([k, l]) => `<button data-show="${k}" aria-pressed="${V.show === k}">${l}</button>`).join('')}
-        </div>
+        </div>`}
         ${tools}
       </div>
-      <label class="search flush">${icon('search')}<input type="search" id="pf-q" placeholder="Search holdings" value="${A.esc(V.q)}" autocomplete="off"></label>
+      ${summary ? '' : `<label class="search flush">${icon('search')}<input type="search" id="pf-q" placeholder="Search holdings" value="${A.esc(V.q)}" autocomplete="off"></label>
       <div class="pf-sort">
         <label for="pf-sort">Sort by</label>
         <select class="select" id="pf-sort">${columns().map(col => `<option value="${col.key}"${col.key === V.sort ? ' selected' : ''}>${col.label}</option>`).join('')}</select>
         <button class="btn sm" id="pf-dir">${sortDirLabel()}</button>
-      </div>
+      </div>`}
       <div class="pf-sort">
         <label for="pf-group">Group by</label>
         <select class="select" id="pf-group">${Object.entries(GROUPINGS).map(([k, g]) => `<option value="${k}"${k === groupKey() ? ' selected' : ''}>${g.label}</option>`).join('')}</select>
-        <button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>
+        ${summary ? '' : `<button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>`}
       </div>
-      <div id="pf-table">${holdingsTable(account, c)}</div>`;
+      <div id="pf-table">${summary ? summaryTable(c) : holdingsTable(account, c)}</div>`;
 }
 
 function bindHoldings(table, again) {
   const draw = () => {
     A.$('#pf-table').innerHTML = table();
+    if (!A.$('#pf-sort')) return;
     A.$('#pf-sort').value = V.sort;
     A.$('#pf-dir').textContent = sortDirLabel();
   };
@@ -968,10 +993,10 @@ function bindHoldings(table, again) {
     V.dir = columnOf(key).text ? 1 : -1;
     draw();
   };
-  A.$('#pf-sort').addEventListener('change', e => sortBy(e.target.value));
+  A.$('#pf-sort')?.addEventListener('change', e => sortBy(e.target.value));
   A.$('#pf-group').addEventListener('change', e => { A.ls.set('pfGroupBy', e.target.value); draw(); });
-  A.$('#pf-dir').addEventListener('click', () => { V.dir = -V.dir; draw(); });
-  A.$('#pf-q').addEventListener('input', e => { V.q = e.target.value; draw(); });
+  A.$('#pf-dir')?.addEventListener('click', () => { V.dir = -V.dir; draw(); });
+  A.$('#pf-q')?.addEventListener('input', e => { V.q = e.target.value; draw(); });
   A.view.querySelectorAll('[data-show]').forEach(b => b.addEventListener('click', () => { V.show = b.dataset.show; again(); }));
   A.view.querySelectorAll('[data-asset]').forEach(b => b.addEventListener('click', () => { V.asset = b.dataset.asset; again(); }));
   A.$('#pf-table').addEventListener('click', e => {
@@ -1007,10 +1032,15 @@ function accountView(r) {
 
 /* ---------- consolidated ---------- */
 
+const summaryOnly = () => A.ls.get('pfConsolidatedView', 'summary') === 'summary';
+
 function brokerFilter(list) {
   const chosen = list.filter(a => pickedBrokers.has(a.id));
   const button = (id, name, on) => `<button data-broker="${id}" aria-pressed="${on}">${A.esc(name)}</button>`;
-  return `<div class="seg pf-assets" role="group" aria-label="Brokers">
+  return `<div class="seg pf-assets" role="group" aria-label="View">
+        ${[['summary', 'Summary', summaryOnly()], ['detailed', 'Detailed', !summaryOnly()]].map(([k, l, on]) => `<button data-view="${k}" aria-pressed="${on}">${l}</button>`).join('')}
+      </div>
+      <div class="seg pf-assets" role="group" aria-label="Brokers">
         ${button('all', 'All brokers', !chosen.length)}${list.map(a => button(a.id, a.name, pickedBrokers.has(a.id))).join('')}
       </div>`;
 }
@@ -1021,12 +1051,14 @@ function consolidatedView() {
   const held = c.lines.filter(l => l.qty > EPS).length;
   const count = new Set(c.lines.flatMap(l => l.holders.map(a => a.id))).size;
   const tools = `<button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>`;
+  const summary = summaryOnly();
   A.view.innerHTML = `
     ${hero('Consolidated portfolio', `${A.plural(held, 'holding')} · ${A.plural(count, 'broker')}`, HOME)}
     <div class="scroll"><div class="pay-page pf-page">
-      ${holdingsBody(null, c, { filter: brokerFilter(list), notes: fxNote(list), tools })}
+      ${holdingsBody(null, c, { filter: brokerFilter(list), notes: fxNote(list), tools, summary })}
     </div></div>`;
-  bindHoldings(() => holdingsTable(null, c), consolidatedView);
+  bindHoldings(() => (summary ? summaryTable(c) : holdingsTable(null, c)), consolidatedView);
+  A.view.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => { A.ls.set('pfConsolidatedView', b.dataset.view); consolidatedView(); }));
   A.view.querySelectorAll('[data-broker]').forEach(b => b.addEventListener('click', () => {
     const id = b.dataset.broker;
     if (id === 'all') pickedBrokers.clear();
