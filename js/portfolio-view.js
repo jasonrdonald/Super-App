@@ -104,7 +104,8 @@ const chosenColumns = () => {
   const picked = new Set(A.ls.get('pfColumns', ['divYield', 'pe', 'roe']));
   return OPTIONAL_COLUMNS.filter(c => picked.has(c.key));
 };
-const columns = () => [...COLUMNS, ...chosenColumns()];
+const BROKERS_COLUMN = { key: 'brokers', label: 'Brokers', text: true, links: true };
+const columns = () => [...COLUMNS.slice(0, 2), ...(mergedPage ? [BROKERS_COLUMN] : []), ...COLUMNS.slice(2), ...chosenColumns()];
 const columnOf = key => columns().find(c => c.key === key) ?? COLUMNS[0];
 
 const yieldLine = v => (v == null || v <= 0 ? '' : `${v.toFixed(2)}% on cost`);
@@ -125,6 +126,8 @@ const EVENT_LABEL = {
 const ACTION_KINDS = new Set(['split', 'bonus', 'merger', 'rename', 'demerger', 'allot', 'adjust']);
 
 const V = { sort: 'value', dir: -1, show: 'current', asset: 'all', q: '' };
+const pickedBrokers = new Set();
+let mergedPage = false;
 const job = { running: false, done: 0, total: 0, failed: 0 };
 let firstVisit = true;
 
@@ -174,8 +177,10 @@ const fxRate = () => A.S.market.find(m => m.symbol === FX_KEY)?.price ?? null;
 
 // Market data for an account's own market, under its plain symbols. US records
 // are kept apart, as a ticker can mean different companies in each country.
+const marketPrefix = account => (isUsd(account) ? US_PREFIX : account.kind === 'crypto' ? CRYPTO_PREFIX : '');
+
 function marketFor(account) {
-  const prefix = isUsd(account) ? US_PREFIX : account.kind === 'crypto' ? CRYPTO_PREFIX : '';
+  const prefix = marketPrefix(account);
   if (!prefix) return A.S.market.filter(m => !m.symbol.includes(':'));
   return A.S.market.filter(m => m.symbol.startsWith(prefix)).map(m => ({ ...m, symbol: m.symbol.slice(prefix.length) }));
 }
@@ -310,15 +315,57 @@ export function portfolioTotal() {
   }));
 }
 
+// A USD line as a full table row in rupees, per-share figures included.
+function rupeeRow(line, rate) {
+  const out = inRupees(line, rate);
+  for (const key of ['avg', 'price', 'eps', 'high52', 'low52', 'fcf']) if (out[key] != null) out[key] *= rate;
+  return { ...out, marketCap: line.capInr ?? line.marketCap };
+}
+
+// One ticker's lines from several brokers as one row. Fundamentals are the same
+// for all of them, so only what depends on the shares held is worked out again.
+function mergeLines(held) {
+  const lines = held.map(h => h.line);
+  const row = { ...(lines.find(l => l.price != null) ?? lines[0]), holders: held.map(h => h.account), brokers: held.map(h => h.account.name).join(', ') };
+  if (lines.length === 1) return row;
+  const sum = key => lines.reduce((n, l) => n + (l[key] ?? 0), 0);
+  for (const key of MONEY_FIELDS) row[key] = lines.every(l => l[key] == null) ? null : sum(key);
+  const pricedCost = lines.filter(l => l.gain != null).reduce((n, l) => n + l.cost, 0);
+  row.qty = sum('qty');
+  row.avg = row.qty > EPS ? row.cost / row.qty : 0;
+  row.flows = lines.flatMap(l => l.flows ?? []);
+  row.xirr = xirr(row.flows);
+  row.gainPct = row.gain != null && pricedCost > 0 ? row.gain / pricedCost * 100 : null;
+  row.realizedPct = row.soldCost > 0 ? row.realized / row.soldCost * 100 : null;
+  row.yieldOnCost = row.cost > 0 ? row.dividends12m / row.cost * 100 : null;
+  return row;
+}
+
+// Every picked broker's lines in rupees, one row a ticker. Markets stay apart, as
+// a ticker can mean different things in each. No rate leaves USD brokers out.
+function consolidatedLines() {
+  const rate = fxRate();
+  const picked = accounts().filter(a => pickedBrokers.has(a.id));
+  const byTicker = new Map();
+  for (const account of (picked.length ? picked : accounts()).filter(a => !isUsd(a) || rate)) {
+    for (const line of computed(account).lines) {
+      const key = marketPrefix(account) + line.symbol;
+      byTicker.set(key, [...(byTicker.get(key) ?? []), { account, line: isUsd(account) ? rupeeRow(line, rate) : line }]);
+    }
+  }
+  return [...byTicker.values()].map(mergeLines);
+}
+
 export const portfolioNav = () => [
   { id: 'home', name: 'Overview', icon: 'pie', href: HOME },
+  { id: 'consolidated', name: 'Consolidated', icon: 'list', href: `${HOME}/consolidated` },
   { id: 'reports', name: 'Reports', icon: 'file', href: `${HOME}/reports` },
   { id: 'transfers', name: 'Transfers', icon: 'swap', href: `${HOME}/transfers` },
   ...accounts().map(a => ({ id: a.id, name: a.name, icon: a.kind === 'crypto' ? 'cloud' : a.kind === 'mf' ? 'chart' : 'card', href: accountPath(a.id) })),
 ];
 
 export function portfolioRouteValid(r) {
-  if (['home', 'add', 'reports', 'transfers'].includes(r.page)) return true;
+  if (['home', 'add', 'reports', 'transfers', 'consolidated'].includes(r.page)) return true;
   if (!accountById(r.id)) return false;
   if (r.page === 'stock') return !!computed(accountById(r.id)).positions.get(r.symbol);
   return ['account', 'reconcile', 'trade'].includes(r.page);
@@ -624,14 +671,16 @@ function bindRestore() {
 
 /* ---------- overview ---------- */
 
+const fxNote = list => (list.some(isUsd) ? `<div class="status">${fxRate() ? `USD brokers are converted at ${perShare(fxRate())} to the dollar` : 'No USD rate yet, so USD brokers are left out of these totals'}${info('fx')}</div>` : '');
+
 function homeView(r) {
   const list = accounts();
-  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a><a class="btn sm" href="${HOME}/transfers">${icon('swap')}<span>Transfers</span></a>` : ''}`;
+  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/consolidated">${icon('list')}<span>Consolidated</span></a><a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a><a class="btn sm" href="${HOME}/transfers">${icon('swap')}<span>Transfers</span></a>` : ''}`;
   const body = list.length
     ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
         <div class="status" id="pf-status">${statusLine()}</div>
-        ${list.some(isUsd) ? `<div class="status">${fxRate() ? `USD brokers are converted at ${perShare(fxRate())} to the dollar` : 'No USD rate yet, so USD brokers are left out of these totals'}${info('fx')}</div>` : ''}
+        ${fxNote(list)}
         ${backupButtons(add)}
         <div class="rows pf-accounts">${list.map(a => {
           const { summary: s, held } = computed(a);
@@ -844,6 +893,7 @@ function groupTable(account, rows) {
   const COLS = columns();
   const cell = (col, r) => {
     const v = r[col.key];
+    if (col.links) return `<td class="pf-name" title="${A.esc(v)}">${r.holders.map(a => `<a class="pf-link" href="${accountPath(a.id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(a.name)}</a>`).join(', ')}</td>`;
     if (col.text) return `<td class="pf-name" title="${A.esc(v)}">${A.esc(v) || '–'}</td>`;
     const sub = col.sub?.(r);
     return `<td class="num ${col.tone ? tone(v) : ''}">${col.f(v, r)}${sub ? `<small>${sub}</small>` : ''}</td>`;
@@ -852,10 +902,11 @@ function groupTable(account, rows) {
   return `<div class="holdings-wrap"><table class="holdings">
     <thead><tr>${COLS.map(columnHeader).join('')}</tr></thead>
     <tbody>${rows.map(r => {
-      const details = reviewDetails(account, r.symbol);
-      const locked = lockedLine(account, r.symbol);
+      const owners = account ? [account] : r.holders;
+      const details = owners.map(a => reviewDetails(a, r.symbol)).filter(Boolean).join(' · ');
+      const locked = owners.map(a => lockedLine(a, r.symbol)).filter(Boolean).join(' · ');
       return `<tr>
-      <th scope="row"><a href="${accountPath(account.id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(r.symbol)}</a></th>
+      <th scope="row"><a href="${accountPath(owners[0].id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(r.symbol)}</a></th>
       ${COLS.slice(1).map(col => cell(col, r)).join('')}
     </tr>${details ? `<tr class="lot-note"><td colspan="${COLS.length}">${icon('check')}${A.esc(details)}</td></tr>` : ''}${locked ? `<tr class="lot-note"><td colspan="${COLS.length}">${icon('lock')}${A.esc(locked)}</td></tr>` : ''}`;
     }).join('')}</tbody>
@@ -870,30 +921,27 @@ function reconChip(account, c) {
   return `<a class="btn sm" href="${accountPath(account.id)}/reconcile">${icon(bad ? 'alert' : 'check')}<span>${label}</span></a>`;
 }
 
-function accountView(r) {
-  const account = accountById(r.id);
-  const c = computed(account);
+// The holdings page shared by each broker and the consolidated view, where account is null.
+function holdingsBody(account, c, { filter = '', notes = '', tools = '' }) {
   const tabs = Object.entries(ASSETS).filter(([, a]) => c.lines.some(l => a.groups.includes(l.group)));
   if (!tabs.some(([k]) => k === V.asset)) V.asset = 'all';
+  if (!columns().some(col => col.key === V.sort)) V.sort = 'value';
   const inView = linesInView(c);
   const open = inView.filter(l => l.qty > EPS).length;
   const sold = inView.length - open;
-  A.view.innerHTML = `
-    ${hero(account.name, `${account.broker} · ${KINDS[account.kind]}${account.clientId ? ` · ${account.clientId}` : ''}`, HOME,
-      `<button class="icon-btn" data-act="pf-menu" data-id="${account.id}" aria-label="Account options">${icon('more')}</button>`)}
-    <div class="scroll"><div class="pay-page pf-page">
+  return `
+      ${filter}
       ${tabs.length > 1 ? `<div class="seg pf-assets" role="group" aria-label="Asset type">
         ${[['all', 'All'], ...tabs.map(([k, a]) => [k, a.label])].map(([k, l]) => `<button data-asset="${k}" aria-pressed="${V.asset === k}">${l}</button>`).join('')}
       </div>` : ''}
       ${summaryStats(summarizeAll(inView))}
       <div class="status" id="pf-status">${statusLine()}</div>
+      ${notes}
       <div class="period">
         <div class="seg" role="group" aria-label="Which holdings">
           ${[['current', `Current (${open})`], ['sold', `Sold (${sold})`], ['all', 'All']].map(([k, l]) => `<button data-show="${k}" aria-pressed="${V.show === k}">${l}</button>`).join('')}
         </div>
-        ${reconChip(account, c)}
-        <button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>
-        <label class="btn sm">${icon('upload')}<span>Load files</span><input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden></label>
+        ${tools}
       </div>
       <label class="search flush">${icon('search')}<input type="search" id="pf-q" placeholder="Search holdings" value="${A.esc(V.q)}" autocomplete="off"></label>
       <div class="pf-sort">
@@ -906,13 +954,12 @@ function accountView(r) {
         <select class="select" id="pf-group">${Object.entries(GROUPINGS).map(([k, g]) => `<option value="${k}"${k === groupKey() ? ' selected' : ''}>${g.label}</option>`).join('')}</select>
         <button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>
       </div>
-      <div id="pf-table">${holdingsTable(account, c)}</div>
-      ${feesPanel(account, c)}
-    </div></div>
-    <a class="fab" href="${accountPath(account.id)}/trade" aria-label="Add transaction">${icon('plus')}</a>`;
+      <div id="pf-table">${holdingsTable(account, c)}</div>`;
+}
 
+function bindHoldings(table, again) {
   const draw = () => {
-    A.$('#pf-table').innerHTML = holdingsTable(account, computed(account));
+    A.$('#pf-table').innerHTML = table();
     A.$('#pf-sort').value = V.sort;
     A.$('#pf-dir').textContent = sortDirLabel();
   };
@@ -925,13 +972,8 @@ function accountView(r) {
   A.$('#pf-group').addEventListener('change', e => { A.ls.set('pfGroupBy', e.target.value); draw(); });
   A.$('#pf-dir').addEventListener('click', () => { V.dir = -V.dir; draw(); });
   A.$('#pf-q').addEventListener('input', e => { V.q = e.target.value; draw(); });
-  A.$('#pf-files').addEventListener('change', async e => {
-    const files = e.target.files;
-    if (files.length) await loadFiles(account, files);
-    A.refresh();
-  });
-  A.view.querySelectorAll('[data-show]').forEach(b => b.addEventListener('click', () => { V.show = b.dataset.show; accountView(r); }));
-  A.view.querySelectorAll('[data-asset]').forEach(b => b.addEventListener('click', () => { V.asset = b.dataset.asset; accountView(r); }));
+  A.view.querySelectorAll('[data-show]').forEach(b => b.addEventListener('click', () => { V.show = b.dataset.show; again(); }));
+  A.view.querySelectorAll('[data-asset]').forEach(b => b.addEventListener('click', () => { V.asset = b.dataset.asset; again(); }));
   A.$('#pf-table').addEventListener('click', e => {
     const b = e.target.closest('[data-sort]');
     if (!b) return;
@@ -939,6 +981,59 @@ function accountView(r) {
     V.dir = -V.dir;
     draw();
   });
+}
+
+function accountView(r) {
+  const account = accountById(r.id);
+  const c = computed(account);
+  const tools = `${reconChip(account, c)}
+        <button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>
+        <label class="btn sm">${icon('upload')}<span>Load files</span><input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden></label>`;
+  A.view.innerHTML = `
+    ${hero(account.name, `${account.broker} · ${KINDS[account.kind]}${account.clientId ? ` · ${account.clientId}` : ''}`, HOME,
+      `<button class="icon-btn" data-act="pf-menu" data-id="${account.id}" aria-label="Account options">${icon('more')}</button>`)}
+    <div class="scroll"><div class="pay-page pf-page">
+      ${holdingsBody(account, c, { tools })}
+      ${feesPanel(account, c)}
+    </div></div>
+    <a class="fab" href="${accountPath(account.id)}/trade" aria-label="Add transaction">${icon('plus')}</a>`;
+  bindHoldings(() => holdingsTable(account, computed(account)), () => accountView(r));
+  A.$('#pf-files').addEventListener('change', async e => {
+    const files = e.target.files;
+    if (files.length) await loadFiles(account, files);
+    A.refresh();
+  });
+}
+
+/* ---------- consolidated ---------- */
+
+function brokerFilter(list) {
+  const chosen = list.filter(a => pickedBrokers.has(a.id));
+  const button = (id, name, on) => `<button data-broker="${id}" aria-pressed="${on}">${A.esc(name)}</button>`;
+  return `<div class="seg pf-assets" role="group" aria-label="Brokers">
+        ${button('all', 'All brokers', !chosen.length)}${list.map(a => button(a.id, a.name, pickedBrokers.has(a.id))).join('')}
+      </div>`;
+}
+
+function consolidatedView() {
+  const list = accounts();
+  const c = { lines: consolidatedLines() };
+  const held = c.lines.filter(l => l.qty > EPS).length;
+  const count = new Set(c.lines.flatMap(l => l.holders.map(a => a.id))).size;
+  const tools = `<button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>`;
+  A.view.innerHTML = `
+    ${hero('Consolidated portfolio', `${A.plural(held, 'holding')} · ${A.plural(count, 'broker')}`, HOME)}
+    <div class="scroll"><div class="pay-page pf-page">
+      ${holdingsBody(null, c, { filter: brokerFilter(list), notes: fxNote(list), tools })}
+    </div></div>`;
+  bindHoldings(() => holdingsTable(null, c), consolidatedView);
+  A.view.querySelectorAll('[data-broker]').forEach(b => b.addEventListener('click', () => {
+    const id = b.dataset.broker;
+    if (id === 'all') pickedBrokers.clear();
+    else if (!pickedBrokers.delete(id)) pickedBrokers.add(id);
+    if (pickedBrokers.size === list.length) pickedBrokers.clear();
+    consolidatedView();
+  }));
 }
 
 async function chooseColumns() {
@@ -1808,7 +1903,9 @@ export async function portfolioAction(b) {
 
 export function portfolioView(r) {
   shown = (r.id && accountById(r.id)?.currency) || CONFIG.currency;
+  mergedPage = r.page === 'consolidated';
   if (r.page === 'add') addView();
+  else if (mergedPage) consolidatedView();
   else if (r.page === 'reports') reportsView(r);
   else if (r.page === 'transfers') transfersView();
   else if (r.page === 'account') accountView(r);

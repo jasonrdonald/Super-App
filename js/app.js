@@ -360,6 +360,7 @@ function parseRoute(hash) {
     if (p[2] === 'add') return { ...base, page: 'add' };
     if (p[2] === 'reports') return { ...base, page: 'reports', tab: p[3] };
     if (p[2] === 'transfers') return { ...base, page: 'transfers' };
+    if (p[2] === 'consolidated') return { ...base, page: 'consolidated' };
     if (p[2] !== 'a' || !p[3]) return null;
     if (p[4] === 'h') return { ...base, page: 'stock', id: p[3], symbol: p[5] };
     return { ...base, page: p[4] || 'account', id: p[3] };
@@ -513,7 +514,7 @@ function renderDrawer() {
 
   const payPage = ['add', 'edit', 'p'].includes(r.page) ? 'manage' : r.page;
   const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.app ? portfolioNav() : [];
-  const current = sec?.id === 'payments' ? payPage : r.page === 'reports' || r.page === 'transfers' ? r.page : r.id ?? 'home';
+  const current = sec?.id === 'payments' ? payPage : ['reports', 'transfers', 'consolidated'].includes(r.page) ? r.page : r.id ?? 'home';
   const nav = sec?.app
     ? `<div class="section-label"><span>${esc(sec.name)}</span></div>
       <ul class="tree">${pages.map(p => `<li>${row(current === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${esc(p.name)}</span></a>`)}</li>`).join('')}</ul>`
