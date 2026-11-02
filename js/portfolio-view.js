@@ -109,7 +109,13 @@ const columnOf = key => columns().find(c => c.key === key) ?? COLUMNS[0];
 
 const yieldLine = v => (v == null || v <= 0 ? '' : `${v.toFixed(2)}% on cost`);
 
-const GROUPS = ['Stocks', 'ETFs', 'Mutual funds', 'Crypto'];
+const GROUPS = ['Stocks', 'ETFs', 'Commodities', 'Debt', 'Mutual funds', 'Crypto'];
+const ASSETS = {
+  equity: { label: 'Stocks & ETFs', groups: ['Stocks', 'ETFs'] },
+  commodities: { label: 'Commodities', groups: ['Commodities'] },
+  debt: { label: 'Debt', groups: ['Debt'] },
+  mf: { label: 'Mutual funds', groups: ['Mutual funds'] },
+};
 
 const EVENT_LABEL = {
   buy: 'Bought', sell: 'Sold', split: 'Split', bonus: 'Bonus', merger: 'Merger', rename: 'Renamed',
@@ -210,6 +216,14 @@ function quoteFor(symbol, rows, market) {
   return file?.close ? { price: file.close, change: null } : null;
 }
 
+// A fund of gold or bonds isn't shares, and only its name says so. Miners are
+// companies, so a gold miners ETF stays put, as do hybrids that part-hold debt.
+function fundGroup(name, rest) {
+  if (/\b(gold|silver|commodit(y|ies))\b/i.test(name) && !/\bminers?\b/i.test(name)) return 'Commodities';
+  const debt = /\b(bonds?|gilt|g-?sec|government securities|liquid|debt|treasury|t-?bills?|overnight|money market|(ultra short|short|low|medium|long) duration|credit risk|floating rate|floater)\b/i;
+  return debt.test(name) && !/\b(equity|hybrid|balanced)\b/i.test(name) ? 'Debt' : rest;
+}
+
 // ETFs trade like stocks, but every fund's ISIN starts with INF.
 function grouper(account, rows, trades) {
   const known = new Map(rows.map(r => [baseSymbol(r.symbol), r]));
@@ -244,8 +258,10 @@ function computed(account) {
       const f = record?.f ?? {};
       const raw = groupOf(p.symbol);
       // US tickers carry no ISIN, so the scanner says which are funds.
-      const group = raw === 'Stocks' && f.type === 'fund' ? 'ETFs' : raw;
-      const line = { ...summarizePosition(p, quoteFor(p.symbol, rows, market)), group, name: record?.name ?? (group === 'Mutual funds' ? p.symbol : '') };
+      const kind = raw === 'Stocks' && f.type === 'fund' ? 'ETFs' : raw;
+      const mutualFund = kind === 'Mutual funds';
+      const group = mutualFund || kind === 'ETFs' ? fundGroup(`${p.symbol} ${record?.name ?? ''}`, kind) : kind;
+      const line = { ...summarizePosition(p, quoteFor(p.symbol, rows, market)), group, mutualFund, name: record?.name ?? (mutualFund ? p.symbol : '') };
       const fileRow = rows.find(r => baseSymbol(r.symbol) === p.symbol);
       if (isUsd(account) && f.marketCap != null) line.capInr = f.marketCap * (fxRate() ?? 1);
       Object.assign(line, f, { sector: f.sector ?? (fileRow?.sector || undefined) });
@@ -348,7 +364,7 @@ async function refreshQuotes() {
       // A fund the broker no longer lists was probably redeemed, so it isn't valued.
       const listed = !rows || rows.some(r => baseSymbol(r.symbol) === line.symbol);
       if (line.group === 'Crypto') { if (open) coins.add(line.symbol); }
-      else if (line.group === 'Mutual funds') { if (open && listed) funds.set(line.symbol, line.symbol); }
+      else if (line.mutualFund) { if (open && listed) funds.set(line.symbol, line.symbol); }
       // Sold stocks are looked up too, for their names.
       else if (isTicker(line.symbol)) stock.add(line.symbol);
     }
@@ -785,7 +801,7 @@ const sortDirLabel = () => (columnOf(V.sort).text
   ? (V.dir > 0 ? 'A to Z ▲' : 'Z to A ▼')
   : (V.dir > 0 ? 'Low to high ▲' : 'High to low ▼'));
 
-const linesInView = c => c.lines.filter(l => V.asset === 'all' || (V.asset === 'mf') === (l.group === 'Mutual funds'));
+const linesInView = c => c.lines.filter(l => V.asset === 'all' || ASSETS[V.asset].groups.includes(l.group));
 
 function rowsToShow(c) {
   const q = V.q.trim().toLowerCase();
@@ -857,8 +873,8 @@ function reconChip(account, c) {
 function accountView(r) {
   const account = accountById(r.id);
   const c = computed(account);
-  const hasFunds = c.lines.some(l => l.group === 'Mutual funds');
-  if (!hasFunds) V.asset = 'all';
+  const tabs = Object.entries(ASSETS).filter(([, a]) => c.lines.some(l => a.groups.includes(l.group)));
+  if (!tabs.some(([k]) => k === V.asset)) V.asset = 'all';
   const inView = linesInView(c);
   const open = inView.filter(l => l.qty > EPS).length;
   const sold = inView.length - open;
@@ -866,8 +882,8 @@ function accountView(r) {
     ${hero(account.name, `${account.broker} · ${KINDS[account.kind]}${account.clientId ? ` · ${account.clientId}` : ''}`, HOME,
       `<button class="icon-btn" data-act="pf-menu" data-id="${account.id}" aria-label="Account options">${icon('more')}</button>`)}
     <div class="scroll"><div class="pay-page pf-page">
-      ${hasFunds ? `<div class="seg" role="group" aria-label="Asset type">
-        ${[['all', 'All'], ['equity', 'Stocks & ETFs'], ['mf', 'Mutual funds']].map(([k, l]) => `<button data-asset="${k}" aria-pressed="${V.asset === k}">${l}</button>`).join('')}
+      ${tabs.length > 1 ? `<div class="seg pf-assets" role="group" aria-label="Asset type">
+        ${[['all', 'All'], ...tabs.map(([k, a]) => [k, a.label])].map(([k, l]) => `<button data-asset="${k}" aria-pressed="${V.asset === k}">${l}</button>`).join('')}
       </div>` : ''}
       ${summaryStats(summarizeAll(inView))}
       <div class="status" id="pf-status">${statusLine()}</div>
@@ -1062,9 +1078,9 @@ function dividendReport() {
     return (costHeldAt(p, end) || (row.last ? costHeldAt(p, row.last) : 0)) * rate;
   };
   const payers = [...byStock.values()];
-  // What was held at the period's end. Funds are left out of the count, as most pay nothing.
+  // What was held at the period's end. Only stocks and stock ETFs count, as the rest mostly pay nothing.
   const stocks = brokers.flatMap(({ account, c }) => c.lines
-    .filter(l => l.group !== 'Mutual funds' && costHeldAt(c.positions.get(l.symbol), end) > 0)
+    .filter(l => ASSETS.equity.groups.includes(l.group) && costHeldAt(c.positions.get(l.symbol), end) > 0)
     .map(l => ({ symbol: l.symbol, account, amount: 0, count: 0 })));
   const quiet = stocks.filter(s => !byStock.has(`${s.account.id}:${s.symbol}`));
   const payingCost = payers.reduce((n, p) => n + baseOf(p), 0);
@@ -1500,7 +1516,7 @@ function reconcileView(r) {
   const fixes = A.S.portfolioActions.filter(a => a.accountId === account.id);
   const quiet = quietYears(A.S.trades.filter(t => t.accountId === account.id && t.kind !== 'mf'), file.asOf);
   // A quiet year only matters if a fund doesn't add up.
-  const fundGap = bad.some(x => file.rows.some(h => h.kind === 'mf' && baseSymbol(h.symbol) === x.symbol) || c.lines.some(l => l.symbol === x.symbol && l.group === 'Mutual funds'));
+  const fundGap = bad.some(x => file.rows.some(h => h.kind === 'mf' && baseSymbol(h.symbol) === x.symbol) || c.lines.some(l => l.symbol === x.symbol && l.mutualFund));
   const quietFunds = fundGap ? quietYears(A.S.trades.filter(t => t.accountId === account.id && t.kind === 'mf'), file.asOf) : [];
   const acted = [...c.positions.values()].filter(p => systemNotes(p).length).sort((a, b) => a.symbol.localeCompare(b.symbol));
   const done = acted.filter(p => noteFor(account.id, p.symbol)?.reviewed).length;

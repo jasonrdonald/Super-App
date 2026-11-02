@@ -294,6 +294,8 @@ a { color: inherit; text-decoration: none; }
 }
 .search.flush { margin: 0; }
 .seg.tabs a { padding: 6px 12px; }
+.seg.pf-assets { flex-wrap: wrap; }
+.seg.pf-assets button { flex: 1 0 auto; }
 
 .stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .stat {

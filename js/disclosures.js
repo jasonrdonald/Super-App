@@ -74,5 +74,6 @@ export const DATA_POINTS = [
   { id: 'growth', label: 'Revenue, EPS and profit growth', sources: ['tradingviewFundamentals'], how: 'Trailing 12 months against the 12 months before.' },
   { id: 'momentum', label: '52-week range, returns, RSI, moving averages', sources: ['tradingview'], how: 'From traded prices.' },
   { id: 'sector', label: 'Sector, industry, market cap', sources: ['tradingviewFundamentals'] },
+  { id: 'assetGroups', label: 'Stocks, ETFs, Commodities and Debt', sources: ['broker', 'tradingview'], how: 'A fund\'s ISIN, scanner type or broker file marks it as an ETF or mutual fund. Its name then decides the group: gold, silver or commodity goes to Commodities; bond, gilt, G-Sec, government securities, liquid, debt, treasury, T-bill, overnight, money market, a duration category, credit risk or floating rate goes to Debt. Hybrid and equity funds, and all others, stay as ETFs or Mutual funds.' },
   { id: 'groups', label: 'Market cap, momentum, quality and growth groups', sources: ['app', 'tradingviewFundamentals'], how: 'Rules listed below. These are the app\'s own labels, not ratings from any source.' },
 ];
