@@ -2539,7 +2539,23 @@ const RATE_COLUMNS = [
   ['symbol', 'Ticker'], ['verdict', 'Verdict'], ['value', 'Market value'], ['perf1w', '1W'], ['perf1m', '1M'], ['perf3m', '3M'], ['perf6m', '6M'], ['perf1y', '1Y'], ['perf5y', '5Y'],
   ...Object.entries(RATING_SCALES).filter(([k]) => k !== 'verdict').map(([k, s]) => [k, s.label]),
 ];
+const RETURN_KEYS = ['perf1w', 'perf1m', 'perf3m', 'perf6m', 'perf1y', 'perf5y'];
 const rateSort = { key: 'value', dir: -1 };
+const rateFilter = {};
+const NOT_RATED = 'Not rated';
+const returnsHidden = () => A.ls.get('pfRateHideReturns', false);
+const ratingName = (l, scale) => l[scale]?.label ?? NOT_RATED;
+
+// One dropdown a rating, with how many stocks each choice has among your stocks.
+function ratingFilters(list) {
+  return `<div class="pf-sort pf-filters rt-filters">
+    ${Object.entries(RATING_SCALES).map(([k, s]) => {
+      const choices = [...s.levels, NOT_RATED].map(level => [level, list.filter(l => ratingName(l, k) === level).length]).filter(([level, n]) => n || level === rateFilter[k]);
+      return `<label><span>${s.label}</span><select class="select" data-rate-filter="${k}"><option value="">All</option>${choices.map(([level, n]) => `<option value="${level}"${level === rateFilter[k] ? ' selected' : ''}>${level} (${n})</option>`).join('')}</select></label>`;
+    }).join('')}
+    ${Object.values(rateFilter).some(Boolean) ? '<button class="btn sm" id="r-rate-clear">Clear filters</button>' : ''}
+  </div>`;
+}
 
 function ratingLegend(scale, list) {
   const { label, levels, rule } = RATING_SCALES[scale];
@@ -2554,7 +2570,7 @@ function ratingLegend(scale, list) {
 
 function ratingReport() {
   const brokers = reportBrokers();
-  const filters = reportFilters(null);
+  const filters = reportFilters(null, `<label class="switch pf-detail"><input type="checkbox" id="r-hide-returns"${returnsHidden() ? ' checked' : ''}><span>Hide returns</span></label>`);
   const indian = brokers.flatMap(({ account, c }) => (isUsd(account) ? [] : c.lines.filter(l => l.group === 'Stocks' && perfType(account, l) === 'Indian stocks').map(l => ({ ...l, account }))));
   const sectors = A.S.market.find(m => m.symbol === SECTOR_PE_KEY)?.f ?? {};
   const list = heldByTicker(indian).map(mergeLines).map(l => {
@@ -2563,7 +2579,11 @@ function ratingReport() {
   });
   if (!list.length) return `${filters}<div class="empty">${icon('chart')}<p>No Indian stocks for this selection.</p></div>`;
   const sortValue = (l, key) => (RATING_SCALES[key] ? l[key]?.rank ?? -1 : l[key] ?? -Infinity);
-  const rows = [...list].sort((a, b) => (rateSort.key === 'symbol' ? a.symbol.localeCompare(b.symbol) : sortValue(a, rateSort.key) - sortValue(b, rateSort.key)) * rateSort.dir);
+  const hide = returnsHidden();
+  if (hide && RETURN_KEYS.includes(rateSort.key)) Object.assign(rateSort, { key: 'value', dir: -1 });
+  const shownColumns = RATE_COLUMNS.filter(([key]) => !hide || !RETURN_KEYS.includes(key));
+  const matching = list.filter(l => Object.entries(rateFilter).every(([k, want]) => !want || ratingName(l, k) === want));
+  const rows = [...matching].sort((a, b) => (rateSort.key === 'symbol' ? a.symbol.localeCompare(b.symbol) : sortValue(a, rateSort.key) - sortValue(b, rateSort.key)) * rateSort.dir);
   const head = ([key, label]) => {
     const on = rateSort.key === key;
     return `<th${key === 'symbol' || RATING_SCALES[key] ? '' : ' class="num"'} aria-sort="${on ? (rateSort.dir > 0 ? 'ascending' : 'descending') : 'none'}"><span class="pf-th"><button data-sort="${key}" data-rate="${key}">${label}${on ? (rateSort.dir > 0 ? ' ▲' : ' ▼') : ''}</button></span></th>`;
@@ -2575,15 +2595,17 @@ function ratingReport() {
     <section class="panel"><h2>What the ratings mean${info('ratings')}</h2>
       <div class="rt-scales">${Object.keys(RATING_SCALES).map(k => ratingLegend(k, list)).join('')}</div>
     </section>
-    <section class="panel"><h2>Your Indian stocks (${list.length})</h2>
+    <section class="panel"><h2>Your Indian stocks (${rows.length === list.length ? list.length : `${rows.length} of ${list.length}`})</h2>
+      ${ratingFilters(list)}
       <p class="muted small chart-note">Returns are each stock's own price change, not your purchase. Verdicts and ratings are a fixed formula on public figures. They aren't investment advice, and they don't know your goals, tax or what you paid. Hover over a rating for its rule.</p>
-      <div class="holdings-wrap"><table class="holdings rt-table">
-        <thead><tr>${RATE_COLUMNS.map(head).join('')}</tr></thead>
+      ${rows.length ? '' : '<p class="muted small">No stocks match these filters.</p>'}
+      <div class="holdings-wrap"${rows.length ? '' : ' hidden'}><table class="holdings rt-table">
+        <thead><tr>${shownColumns.map(head).join('')}</tr></thead>
         <tbody>${rows.map(l => `<tr>
           <th scope="row"><a href="${accountPath(l.holders[0].id)}/h/${encodeURIComponent(l.symbol)}" title="${A.esc(l.name)}">${A.esc(l.symbol)}</a></th>
           <td>${ratingChip('verdict', l.verdict)}</td>
           <td class="num">${money(l.value)}</td>
-          ${['perf1w', 'perf1m', 'perf3m', 'perf6m', 'perf1y', 'perf5y'].map(k => `<td class="num ${tone(l[k])}">${pct(l[k])}</td>`).join('')}
+          ${hide ? '' : RETURN_KEYS.map(k => `<td class="num ${tone(l[k])}">${pct(l[k])}</td>`).join('')}
           ${Object.keys(RATING_SCALES).filter(k => k !== 'verdict').map(k => `<td>${ratingChip(k, l[k])}</td>`).join('')}
         </tr>`).join('')}</tbody>
       </table></div>
@@ -2612,14 +2634,20 @@ function reportsView(r) {
     drawChart(box);
     new ResizeObserver(() => drawChart(box)).observe(box);
   });
-  A.view.querySelectorAll('[data-rate]').forEach(b => b.addEventListener('click', () => {
+  const inPlace = change => {
     const top = A.$('.scroll').scrollTop;
+    change();
+    reportsView(r);
+    A.$('.scroll').scrollTop = top;
+  };
+  A.view.querySelectorAll('[data-rate]').forEach(b => b.addEventListener('click', () => inPlace(() => {
     const key = b.dataset.rate;
     rateSort.dir = rateSort.key === key ? -rateSort.dir : key === 'symbol' ? 1 : -1;
     rateSort.key = key;
-    reportsView(r);
-    A.$('.scroll').scrollTop = top;
-  }));
+  })));
+  A.view.querySelectorAll('[data-rate-filter]').forEach(s => s.addEventListener('change', () => inPlace(() => { rateFilter[s.dataset.rateFilter] = s.value; })));
+  A.$('#r-rate-clear')?.addEventListener('click', () => inPlace(() => Object.keys(rateFilter).forEach(k => delete rateFilter[k])));
+  A.$('#r-hide-returns')?.addEventListener('change', e => inPlace(() => A.ls.set('pfRateHideReturns', e.target.checked)));
   A.$('#r-load-history')?.addEventListener('click', () => { A.ls.set('pfTimelineMarket', true); reportsView(r); refreshMonthly(); });
   A.view.querySelectorAll('[data-top]').forEach(b => b.addEventListener('click', () => {
     const top = A.$('.scroll').scrollTop;

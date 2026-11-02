@@ -531,6 +531,9 @@ th.num .pf-th { justify-content: flex-end; }
 .rt-poor { --rt: var(--warn); }
 .rt-worst { --rt: var(--danger); }
 .rt-table td { vertical-align: middle; }
+.rt-filters { align-items: flex-end; margin-bottom: 8px; }
+.rt-filters label { display: grid; gap: 2px; flex: 1 1 130px; min-width: 0; }
+.rt-filters .select { width: 100%; }
 .rt-scales { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 .rt-scale h3 { margin: 0 0 6px; font-size: .9rem; }
 .rt-scale p { margin: 6px 0 0; font-size: .74rem; }
