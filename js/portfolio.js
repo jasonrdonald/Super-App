@@ -5,7 +5,7 @@
 
 import { CORPORATE_ACTIONS, PUBLIC_ISSUES, NOT_SPLITS } from './corporate-actions.js';
 
-const EPS = 1e-6;
+const EPS = 1e-9; // Below the 0.00000001 a coin can be credited in.
 
 export const ISSUE_LABEL = { rights: 'Rights issue', ipo: 'IPO allotment', transfer: 'Broker transfer', other: 'Other' };
 
@@ -145,7 +145,7 @@ function applyAction(state, a, fractional) {
 // Same-day buys and sells pair with each other first, so an intraday round trip
 // never touches the delivery lots. This also covers selling before buying.
 function settleDay(p, date, trades) {
-  const buys = trades.filter(t => t.side !== 'sell').map(t => ({ t, left: t.qty }));
+  const buys = trades.filter(t => t.side === 'buy').map(t => ({ t, left: t.qty }));
   const sells = trades.filter(t => t.side === 'sell').map(t => ({ t, left: t.qty, gain: 0, intraday: 0 }));
   let b = 0;
   for (const s of sells) {
@@ -160,8 +160,13 @@ function settleDay(p, date, trades) {
     }
   }
   for (const { t, left } of buys) {
-    if (left > EPS) p.lots.push({ qty: left, price: t.price, date, origin: t.symbol });
-    p.events.push({ kind: 'buy', date, qty: t.qty, price: t.price, exchange: t.exchange, origin: t.origin, tradeId: t.id, manual: t.manual, intraday: t.qty - left });
+    if (left > EPS) p.lots.push({ qty: left, price: t.price, date, origin: t.symbol, source: t.note || undefined });
+    p.events.push({ kind: 'buy', date, qty: t.qty, price: t.price, exchange: t.exchange, origin: t.origin, tradeId: t.id, manual: t.manual, intraday: t.qty - left, source: t.note || undefined });
+  }
+  // Coins sent elsewhere or paid as fees leave with their cost, and aren't a sale.
+  for (const t of trades.filter(x => x.side === 'out')) {
+    takeFifo(p, t.qty);
+    p.events.push({ kind: 'out', date, qty: -t.qty, origin: t.origin, source: t.note || undefined, tradeId: t.id });
   }
   for (const s of sells) {
     const short = takeFifo(p, s.left, (lot, take) => {
@@ -395,11 +400,11 @@ export function cleanAccount(x) {
 
 export function cleanTrade(x) {
   if (typeof x?.id !== 'string' || !isId(x.accountId) || !x.symbol || !isDate(x.date)) return null;
-  if (!(x.side === 'buy' || x.side === 'sell') || !(x.qty > 0) || !Number.isFinite(x.qty) || !(x.price >= 0) || !Number.isFinite(x.price)) return null;
+  if (!['buy', 'sell', 'out'].includes(x.side) || !(x.qty > 0) || !Number.isFinite(x.qty) || !(x.price >= 0) || !Number.isFinite(x.price)) return null;
   return {
     id: text(x.id, 300), accountId: x.accountId, symbol: text(x.symbol, 120), isin: text(x.isin, 20), date: x.date, side: x.side,
     qty: x.qty, price: x.price, exchange: text(x.exchange, 20), series: text(x.series, 20), tradeId: text(x.tradeId, 60), time: text(x.time, 30),
-    kind: x.kind === 'mf' ? 'mf' : 'stock', manual: !!x.manual, updatedAt: finite(x.updatedAt, Date.now()),
+    kind: x.kind === 'mf' ? 'mf' : 'stock', manual: !!x.manual, note: text(x.note, 80), updatedAt: finite(x.updatedAt, Date.now()),
   };
 }
 
@@ -419,6 +424,15 @@ export function cleanAdjustment(x) {
     id: x.id, accountId: x.accountId, type: x.type, symbol: text(x.symbol, 120), date: x.date, qty: finite(x.qty),
     avg: x.avg >= 0 && x.avg !== null ? x.avg : null, price: finite(x.price), issue: x.issue in ISSUE_LABEL ? x.issue : 'rights',
     direction: x.direction === 'out' ? 'out' : 'in', party: text(x.party, 80), note: text(x.note), createdAt: finite(x.createdAt, t), updatedAt: finite(x.updatedAt, t),
+  };
+}
+
+export function cleanContract(x) {
+  if (typeof x?.id !== 'string' || !isId(x.accountId) || !x.coin || !isDate(x.start)) return null;
+  return {
+    id: text(x.id, 200), accountId: x.accountId, coin: text(x.coin, 20), contract: text(x.contract, 60), start: x.start,
+    maturity: isDate(x.maturity) ? x.maturity : '', rate: text(x.rate, 20), tenure: text(x.tenure, 20), principal: finite(x.principal),
+    earned: finite(x.earned), status: text(x.status, 40), updatedAt: finite(x.updatedAt, Date.now()),
   };
 }
 

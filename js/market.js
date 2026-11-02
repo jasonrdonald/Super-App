@@ -210,19 +210,30 @@ export async function fundNav(code) {
 
 /* ---------- crypto: CoinGecko ---------- */
 
+// Coins with fixed ids, as a search is rate limited and short symbols are ambiguous.
+const COINS = {
+  BTC: ['bitcoin', 'Bitcoin'], ETH: ['ethereum', 'Ethereum'], XRP: ['ripple', 'XRP'], DOGE: ['dogecoin', 'Dogecoin'],
+  LTC: ['litecoin', 'Litecoin'], BCH: ['bitcoin-cash', 'Bitcoin Cash'], TRX: ['tron', 'TRON'], BNB: ['binancecoin', 'BNB'],
+  USDT: ['tether', 'Tether'], POL: ['polygon-ecosystem-token', 'Polygon'], MANA: ['decentraland', 'Decentraland'],
+  BAT: ['basic-attention-token', 'Basic Attention Token'], A: ['vaulta', 'Vaulta (was EOS)'], IQ: ['everipedia', 'IQ'],
+};
+
 export async function cryptoQuotes(symbols, currency = 'inr') {
   const quotes = new Map();
   const ids = new Map();
   for (const symbol of symbols) {
-    const res = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(symbol)}`, { signal: timed() });
-    const coin = (await res.json()).coins?.find(c => c.symbol.toUpperCase() === symbol.toUpperCase());
+    const known = COINS[symbol.toUpperCase()];
+    if (known) { ids.set(known[0], symbol); continue; }
+    const res = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(symbol)}`, { signal: timed() }).catch(() => null);
+    const coin = res?.ok ? (await res.json()).coins?.find(c => c.symbol.toUpperCase() === symbol.toUpperCase()) : null;
     if (coin) ids.set(coin.id, symbol);
   }
   if (!ids.size) return quotes;
   const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${[...ids.keys()].join(',')}&vs_currencies=${currency}&include_24hr_change=true`, { signal: timed() });
   for (const [id, q] of Object.entries(await res.json())) {
     const price = q[currency], changePct = q[`${currency}_24h_change`] ?? null;
-    quotes.set(ids.get(id), { price, changePct, change: changePct == null ? null : price - price / (1 + changePct / 100) });
+    const symbol = ids.get(id);
+    quotes.set(symbol, { price, changePct, change: changePct == null ? null : price - price / (1 + changePct / 100), name: COINS[symbol.toUpperCase()]?.[1] ?? symbol });
   }
   return quotes;
 }

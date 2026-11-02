@@ -17,6 +17,8 @@ export const CORPORATE_ACTIONS = [
   { type: 'demerger', symbol: 'RELIANCE', to: 'JIOFIN', date: '2023-07-20', num: 1, den: 1, costShare: 0.0468, note: 'Financial services demerged' },
   { type: 'demerger', symbol: 'SIEMENS', to: 'ENRIN', date: '2025-04-07', num: 1, den: 1, costShare: 0.2382, note: 'Energy business demerged' },
   { type: 'demerger', symbol: 'TMPV', to: 'TMCV', date: '2025-10-14', num: 1, den: 1, costShare: 0.3115, note: 'Commercial vehicles demerged' },
+  { type: 'rename', symbol: 'MATIC', to: 'POL', date: '2024-09-13', note: 'Coin swapped one for one' },
+  { type: 'rename', symbol: 'EOS', to: 'A', date: '2025-05-29', note: 'EOS became Vaulta, one for one' },
   { type: 'demerger', symbol: 'GE', to: 'GEV', date: '2024-04-02', num: 1, den: 4, costShare: 0.2026, note: 'GE Vernova spun off' },
 ];
 

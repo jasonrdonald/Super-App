@@ -6,7 +6,7 @@ import { CONFIG, VERSION } from './config.js';
 import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } from './sections.js';
 import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
-import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote as cleanPortfolioNote } from './portfolio.js';
+import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanNote as cleanPortfolioNote } from './portfolio.js';
 import { initPortfolio, disclosureView, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTileText, portfolioChanged } from './portfolio-view.js';
 
 const TRASH_DAYS = 30;
@@ -37,6 +37,7 @@ const S = {
   brokerHoldings: [],
   portfolioActions: [],
   portfolioNotes: [],
+  earnContracts: [],
   market: [],
   open: new Set(ls.get('open', [])),
   route: null,
@@ -226,6 +227,7 @@ const snapshot = () => ({
   brokerHoldings: S.brokerHoldings,
   portfolioActions: S.portfolioActions,
   portfolioNotes: S.portfolioNotes,
+  earnContracts: S.earnContracts,
 });
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -289,7 +291,7 @@ async function importData(data) {
   await db.putMany('notebooks', nbChanged);
   await db.putMany('notes', noteChanged);
   for (const [store, clean] of [['paymentCategories', cleanCategory], ['paymentTypes', cleanType], ['payments', cleanPayment], ['paymentRecords', cleanRecord],
-    ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote]]) {
+    ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote], ['earnContracts', cleanContract]]) {
     const items = (Array.isArray(data[store]) ? data[store] : []).map(clean).filter(Boolean);
     await db.putMany(store, items.map(x => merge(S[store], x, true)).filter(Boolean));
   }
@@ -1257,7 +1259,7 @@ async function init() {
   initPayments(helpers);
   initPortfolio(helpers);
   try {
-    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'market'];
+    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'market'];
     (await Promise.all(stores.map(db.all))).forEach((rows, i) => { S[stores[i]] = rows; });
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;

@@ -185,6 +185,54 @@ function nipponTrades(rows) {
   return { trades, skipped, clientId: folio };
 }
 
+/* ---------- Zebpay: crypto ---------- */
+
+// The Consolidated sheet records every movement of coins. A coin put into Earn
+// is still yours, so Earning and Lending Debits change nothing here, and the
+// Credit that closes a contract only adds its interest. Coin swaps are one for
+// one and handled as renames. Addresses and fiat movements aren't kept.
+function zebpayTrades(rows) {
+  const trades = [];
+  const add = (x, side, qty, price, note = '') => {
+    const [d, m, y] = String(x.date).split('/');
+    const date = `${y}-${m}-${d}`;
+    const coin = String(x['coin cryptopack name']).trim();
+    const type = String(x['transaction type']).trim();
+    trades.push({
+      symbol: coin, isin: '', date, side, qty, price, note, kind: 'stock', exchange: 'Zebpay', series: '',
+      tradeId: `${x['trade id contract id']}-${type}-${coin}-${date}-${x['time utc']}-${note}`, time: `${date}T${x['time utc']}`,
+    });
+  };
+  for (const x of headedRows(rows, 'transaction type')) {
+    const coin = String(x['coin cryptopack name']).trim();
+    const type = String(x['transaction type']).trim();
+    const qty = Number(x.quantity);
+    if (!coin || coin === 'INR') continue;
+    if (/ (buy|sell)$/i.test(type) && qty > 0) {
+      // The total includes fees and GST, so cost carries them.
+      const total = Number(x['total debit credit fiat']) || Number(x['trade amount']);
+      add(x, /buy$/i.test(type) ? 'buy' : 'sell', qty, total / qty);
+    } else if (type === 'Send') add(x, 'out', qty, 0, 'Sent out of Zebpay');
+    else if (type === 'Membership Fees') add(x, 'out', qty, 0, 'Membership fee paid in coin');
+    else if (type === 'Receive') add(x, 'buy', qty, 0, 'Received');
+    else if (type === 'Earning (Legacy)') add(x, 'buy', qty, 0, 'Reward');
+    else if (type === 'Earning Credit' || type === 'Lending Credit') {
+      const interest = Number(x['earning interest']);
+      if (interest > 0) add(x, 'buy', interest, 0, 'Earn interest');
+    }
+  }
+  return { trades, skipped: 0 };
+}
+
+function zebpayContracts(rows) {
+  const day = s => { const [d, m, y] = String(s).slice(0, 10).split('-'); return `${y}-${m}-${d}`; };
+  return headedRows(rows, 'contractnumber').map(x => ({
+    coin: String(x.currencycode).trim(), contract: String(x.contractnumber).trim(), start: day(x['actualstartdate utc']),
+    maturity: day(x['maturitydate utc']), rate: String(x.interestrate), tenure: String(x.tenure),
+    principal: Number(x.principleamount) || 0, earned: Number(x.accruedearnings) || 0, status: String(x.contractstatus).trim(),
+  }));
+}
+
 /* ---------- Aionion Capital ---------- */
 
 // Net value includes charges, and the broker's average cost counts them, so the
@@ -236,6 +284,8 @@ export async function parseBrokerFile(file) {
   }
   const sheets = await readWorkbook(file);
   const first = Object.values(sheets)[0] ?? [];
+  if (sheets.Consolidated) return { kind: 'tradebook', clientId: '', ...zebpayTrades(sheets.Consolidated) };
+  if (sheets.Earning) return { kind: 'earnings', clientId: '', contracts: zebpayContracts(sheets.Earning) };
   const heading = String(textOf(first, /EQUITY (TRADES|PORTFOLIO) STATEMENT/));
   if (heading) {
     const clientId = String(metaValue(first, 'client id'));

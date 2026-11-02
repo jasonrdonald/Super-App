@@ -1,17 +1,19 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
-import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanNote, cleanMarket } from './portfolio.js';
+import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
 import { stockQuotes, usQuotes, usdInr, stockEvents, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, EVENT_GAP_MS } from './market.js';
+import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS } from './disclosures.js';
 import { GROUPINGS, bandOf, orderBands } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
-const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Nippon MF', 'Aionion Capital', 'Other'];
+const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Nippon MF', 'Aionion Capital', 'Zebpay', 'Blockchain Wallet', 'Other'];
 const FX_KEY = 'FX:USDINR';
 const US_PREFIX = 'US:';
+const CRYPTO_PREFIX = 'CR:';
 const isTicker = s => /^[A-Z0-9&_-]+$/.test(s);
 const HOME = '#/s/portfolio';
 const QUOTE_MAX_AGE = 6 * 60 * 60 * 1000;
@@ -111,7 +113,7 @@ const GROUPS = ['Stocks', 'ETFs', 'Mutual funds', 'Crypto'];
 
 const EVENT_LABEL = {
   buy: 'Bought', sell: 'Sold', split: 'Split', bonus: 'Bonus', merger: 'Merger', rename: 'Renamed',
-  demerger: 'Demerger', dividend: 'Dividend', adjust: 'Broker adjustment', allot: 'Allotment',
+  demerger: 'Demerger', dividend: 'Dividend', adjust: 'Broker adjustment', allot: 'Allotment', out: 'Moved out',
 };
 
 const ACTION_KINDS = new Set(['split', 'bonus', 'merger', 'rename', 'demerger', 'allot', 'adjust']);
@@ -153,7 +155,8 @@ function money(v, signed) {
   return signed && v > 0 ? `+${text}` : text;
 }
 const pct = v => (v == null ? '–' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`);
-const qtyText = v => (isPrivate() ? MASK : new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 3 }).format(v));
+// Coins can be far below one, where three decimals would show nothing.
+const qtyText = v => (isPrivate() ? MASK : new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: Math.abs(v) < 1 ? 8 : 3 }).format(v));
 const tone = v => (v == null || Math.abs(v) < 0.005 ? '' : v > 0 ? 'up' : 'down');
 const day = s => A.fmt(new Date(`${s}T00:00:00`), { dateStyle: 'medium' });
 
@@ -165,8 +168,18 @@ const fxRate = () => A.S.market.find(m => m.symbol === FX_KEY)?.price ?? null;
 // Market data for an account's own market, under its plain symbols. US records
 // are kept apart, as a ticker can mean different companies in each country.
 function marketFor(account) {
-  if (!isUsd(account)) return A.S.market.filter(m => !m.symbol.includes(':'));
-  return A.S.market.filter(m => m.symbol.startsWith(US_PREFIX)).map(m => ({ ...m, symbol: m.symbol.slice(US_PREFIX.length) }));
+  const prefix = isUsd(account) ? US_PREFIX : account.kind === 'crypto' ? CRYPTO_PREFIX : '';
+  if (!prefix) return A.S.market.filter(m => !m.symbol.includes(':'));
+  return A.S.market.filter(m => m.symbol.startsWith(prefix)).map(m => ({ ...m, symbol: m.symbol.slice(prefix.length) }));
+}
+
+// Earn contracts still running. Their coins stay in holdings the whole time.
+const lockedOf = (accountId, coin) => A.S.earnContracts.filter(c => c.accountId === accountId && c.coin === coin && c.status === 'Active');
+
+function lockedLine(account, symbol) {
+  const list = lockedOf(account.id, symbol);
+  if (!list.length) return '';
+  return list.map(c => `Locked in Earn: ${qtyText(c.principal)} ${c.coin} until ${day(c.maturity)} at ${c.rate}`).join(' · ');
 }
 
 function quoteFor(symbol, rows, market) {
@@ -325,7 +338,7 @@ async function refreshQuotes() {
     const rate = await usdInr();
     if (rate) apply(FX_KEY, { price: rate });
   }
-  if (coins.size) (await cryptoQuotes([...coins])).forEach((q, s) => apply(s, q));
+  if (coins.size) (await cryptoQuotes([...coins])).forEach((q, s) => apply(CRYPTO_PREFIX + s, q));
   const fileRow = name => A.S.brokerHoldings.flatMap(h => h.rows).find(x => baseSymbol(x.symbol) === name);
   for (const name of funds.keys()) {
     const isin = fileRow(name)?.isin || A.S.trades.find(t => t.symbol === name)?.isin;
@@ -471,6 +484,7 @@ export const portfolioBackupText = () => JSON.stringify({
   brokerHoldings: A.S.brokerHoldings,
   portfolioActions: A.S.portfolioActions,
   portfolioNotes: A.S.portfolioNotes,
+  earnContracts: A.S.earnContracts,
   market: A.S.market,
 }, null, 1);
 
@@ -497,7 +511,7 @@ async function saveBackup() {
 
 // Market data stays: it is public, and slow to load again.
 async function clearBrokers() {
-  for (const store of ['brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes']) {
+  for (const store of ['brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts']) {
     await db.clear(store);
     A.S[store] = [];
   }
@@ -546,6 +560,7 @@ async function restoreBackup(file) {
   await merge('brokerHoldings', rows('brokerHoldings', cleanHoldingsFile).filter(h => ids.has(h.id)), 'id', edited);
   await merge('portfolioActions', rows('portfolioActions', cleanAdjustment).filter(a => ids.has(a.accountId)), 'id', edited);
   await merge('portfolioNotes', rows('portfolioNotes', cleanNote).filter(n => ids.has(n.accountId)), 'id', edited);
+  await merge('earnContracts', rows('earnContracts', cleanContract).filter(c => ids.has(c.accountId)), 'id', edited);
   await merge('market', rows('market', cleanMarket), 'symbol', m => Math.max(m.eventsAt ?? 0, m.quotedAt ?? 0));
   A.markDirty();
   invalidate();
@@ -613,6 +628,7 @@ function addView() {
   form.elements.broker.addEventListener('change', e => {
     form.elements.currency.value = e.target.value === 'Vested' ? 'USD' : 'INR';
     if (e.target.value === 'Nippon MF') form.elements.kind.value = 'mf';
+    if (e.target.value === 'Zebpay' || e.target.value === 'Blockchain Wallet') form.elements.kind.value = 'crypto';
   });
   form.addEventListener('submit', async e => {
     e.preventDefault();
@@ -707,6 +723,11 @@ async function loadFiles(account, files) {
   }
   A.S.trades.push(...fresh);
   await db.putMany('trades', fresh);
+  // The latest file wins, as a contract's status changes over its life.
+  const contracts = parsed.flatMap(p => p.contracts ?? []).map(c => ({ ...c, id: `${account.id}:${c.contract}`, accountId: account.id, updatedAt: Date.now() }));
+  const newIds = new Set(contracts.map(c => c.id));
+  A.S.earnContracts = [...A.S.earnContracts.filter(c => !newIds.has(c.id)), ...contracts];
+  await db.putMany('earnContracts', contracts);
   const statements = parsed.filter(p => p.kind === 'holdings').sort((a, b) => a.asOf.localeCompare(b.asOf));
   const latest = statements.at(-1);
   if (latest && latest.asOf >= (holdingsOf(account.id)?.asOf ?? '')) {
@@ -780,10 +801,11 @@ function groupTable(account, rows) {
     <thead><tr>${COLS.map(columnHeader).join('')}</tr></thead>
     <tbody>${rows.map(r => {
       const details = reviewDetails(account, r.symbol);
+      const locked = lockedLine(account, r.symbol);
       return `<tr>
       <th scope="row"><a href="${accountPath(account.id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(r.symbol)}</a></th>
       ${COLS.slice(1).map(col => cell(col, r)).join('')}
-    </tr>${details ? `<tr class="lot-note"><td colspan="${COLS.length}">${icon('check')}${A.esc(details)}</td></tr>` : ''}`;
+    </tr>${details ? `<tr class="lot-note"><td colspan="${COLS.length}">${icon('check')}${A.esc(details)}</td></tr>` : ''}${locked ? `<tr class="lot-note"><td colspan="${COLS.length}">${icon('lock')}${A.esc(locked)}</td></tr>` : ''}`;
     }).join('')}</tbody>
     <tfoot><tr><th scope="row">Total</th>${COLS.slice(1).map(col => (col.key in totals ? `<td class="num ${col.tone ? tone(totals[col.key]) : ''}">${col.f(totals[col.key], total)}${col.sub?.(total) ? `<small>${col.sub(total)}</small>` : ''}</td>` : '<td></td>')).join('')}</tr></tfoot>
   </table></div>`;
@@ -909,7 +931,7 @@ export function disclosureView() {
 /* ---------- reports ---------- */
 
 const R = { broker: 'all', year: 'all' };
-const REPORTS = { dividends: 'Dividends', gains: 'Capital gains' };
+const REPORTS = { dividends: 'Dividends', gains: 'Capital gains', earn: 'Crypto earnings' };
 
 // Indian financial years run April to March, named by the year they start.
 const fyStart = date => Number(date.slice(0, 4)) - (date.slice(5, 7) < '04' ? 1 : 0);
@@ -1085,9 +1107,59 @@ function gainsReport() {
     <p class="muted small">Sells are matched to buys oldest first. Long term means held over 12 months, or over 24 for US shares. Excludes charges, and doesn't apply every tax rule, such as debt fund treatment, so check with your broker's tax statement before filing.</p>`;
 }
 
+// Interest from Earn contracts plus older rewards, by coin. Both are in coins, so
+// rupee values use today's price, not the price on the day they were credited.
+function earnReport() {
+  const brokers = reportBrokers().filter(b => b.account.kind === 'crypto');
+  const ids = new Set(brokers.map(b => b.account.id));
+  const contracts = A.S.earnContracts.filter(c => ids.has(c.accountId));
+  const rewards = A.S.trades.filter(t => ids.has(t.accountId) && t.note === 'Reward');
+  const dates = [...contracts.map(c => c.start), ...rewards.map(t => t.date)];
+  const filters = reportFilters([...new Set(dates.map(fyStart))].sort((a, b) => b - a));
+  if (!brokers.length) return `${filters}<div class="empty">${icon('file')}<p>No crypto broker in this selection.</p></div>`;
+  const inPeriod = contracts.filter(c => inYear(c.start));
+  const paid = rewards.filter(t => inYear(t.date));
+  const priceOf = (accountId, coin) => brokers.find(b => b.account.id === accountId)?.c.lines.find(l => l.symbol === coin)?.price ?? 0;
+  const coins = new Map();
+  const rowFor = (accountId, coin) => {
+    const key = `${accountId}:${coin}`;
+    if (!coins.has(key)) coins.set(key, { coin, price: priceOf(accountId, coin), locked: 0, earned: 0, rewards: 0, contracts: 0 });
+    return coins.get(key);
+  };
+  for (const c of inPeriod) {
+    const row = rowFor(c.accountId, c.coin);
+    row.contracts++;
+    row.earned += c.earned;
+    if (c.status === 'Active') row.locked += c.principal;
+  }
+  // Rewards paid before a coin swap count under the coin held now.
+  const coinNow = s => CORPORATE_ACTIONS.find(a => a.type === 'rename' && a.symbol === s)?.to ?? s;
+  for (const t of paid) rowFor(t.accountId, coinNow(t.symbol)).rewards += t.qty;
+  const list = [...coins.values()];
+  const valueOf = key => list.reduce((n, r) => n + r[key] * r.price, 0);
+  const active = inPeriod.filter(c => c.status === 'Active');
+  const coinQty = v => (v ? v.toFixed(8).replace(/0+$/, '').replace(/\.$/, '') : '–');
+  return `${filters}
+    <div class="stats">
+      ${stat(`Locked in Earn now${info('earn')}`, money(valueOf('locked')), A.plural(active.length, 'active contract'))}
+      ${stat(`Earn interest${info('earn')}`, money(valueOf('earned')), 'At today\'s price')}
+      ${stat('Rewards', money(valueOf('rewards')), 'At today\'s price')}
+      ${stat('Contracts', String(inPeriod.length), R.year === 'all' ? 'All years' : 'Started this year')}
+    </div>
+    ${!list.length ? `<div class="empty">${icon('file')}<p>No earnings for this selection.</p></div>` : !detailed() ? '' : `<section class="panel"><h2>By coin</h2><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Coin</th><th class="num">Locked</th><th class="num">Earn interest</th><th class="num">Rewards</th><th class="num">Value earned</th></tr></thead>
+      <tbody>${list.map(r => `<tr><td>${A.esc(r.coin)}</td><td class="num">${isPrivate() ? MASK : coinQty(r.locked)}</td><td class="num">${isPrivate() ? MASK : coinQty(r.earned)}</td><td class="num">${isPrivate() ? MASK : coinQty(r.rewards)}</td><td class="num">${money((r.earned + r.rewards) * r.price)}</td></tr>`).join('')}</tbody>
+    </table></div></section>
+    <section class="panel"><h2>Contracts (${inPeriod.length})</h2><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Coin</th><th>Started</th><th>Matures</th><th>Rate</th><th>Status</th><th class="num">Principal</th><th class="num">Earned</th></tr></thead>
+      <tbody>${[...inPeriod].sort((a, b) => b.start.localeCompare(a.start)).map(c => `<tr><td>${A.esc(c.coin)}</td><td>${day(c.start)}</td><td>${day(c.maturity)}</td><td>${A.esc(c.rate)}</td><td>${A.esc(c.status)}</td><td class="num">${isPrivate() ? MASK : coinQty(c.principal)}</td><td class="num">${isPrivate() ? MASK : coinQty(c.earned)}</td></tr>`).join('')}</tbody>
+    </table></div></section>`}
+    <p class="muted small">Coins locked in Earn stay in your holdings. Interest on active contracts is what has accrued so far. Rupee values use today's price, not the price when credited, so this isn't a tax figure.</p>`;
+}
+
 function reportsView(r) {
   const tab = REPORTS[r.tab] ? r.tab : 'dividends';
-  const body = tab === 'gains' ? gainsReport() : dividendReport();
+  const body = tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : dividendReport();
   A.view.innerHTML = `
     ${hero('Reports', REPORTS[tab], HOME)}
     <div class="seg tabs" role="group" aria-label="Report">
@@ -1423,6 +1495,7 @@ function tradeView(r) {
       <label class="f"><span>Date</span><input name="date" type="date" required max="${today}" value="${today}"></label>
       <label class="f"><span>Quantity</span><input name="qty" type="number" inputmode="decimal" min="0.00000001" step="any" required></label>
       <label class="f"><span>Price per unit</span><input name="price" type="number" inputmode="decimal" min="0" step="any" required></label>
+      <label class="f wide"><span>Note (optional)</span><input name="note" maxlength="80" placeholder="e.g. Moved from another broker. Use the date and cost of the original buy." autocomplete="off"></label>
       <div class="f-actions wide"><button class="btn primary" type="submit">Add transaction</button><a class="btn ghost" href="${back}">Cancel</a></div>
     </form></div>`;
   const form = A.$('#pf-trade');
@@ -1434,7 +1507,7 @@ function tradeView(r) {
     if (!symbol) return A.toast('Enter a symbol.');
     const trade = {
       id: A.uid(), accountId: account.id, manual: true, isin: '', exchange: '', series: '', tradeId: '', time: '',
-      symbol: account.kind === 'mf' ? symbol : symbol.toUpperCase(), date: d.date, side: d.side, qty: Number(d.qty), price: Number(d.price), updatedAt: Date.now(),
+      symbol: account.kind === 'mf' ? symbol : symbol.toUpperCase(), date: d.date, side: d.side, qty: Number(d.qty), price: Number(d.price), note: d.note.trim(), updatedAt: Date.now(),
     };
     A.S.trades.push(trade);
     await A.persist('trades', trade);
@@ -1464,6 +1537,8 @@ async function accountMenu(id) {
     if (!await A.confirmDlg(`Delete “${account.name}”?`, `Its ${A.plural(trades.length, 'trade')} and holdings file are removed from this device. This cannot be undone.`, 'Delete')) return;
     for (const t of trades) await db.del('trades', t.id);
     for (const a of A.S.portfolioActions.filter(x => x.accountId === id)) await db.del('portfolioActions', a.id);
+    for (const c of A.S.earnContracts.filter(x => x.accountId === id)) await db.del('earnContracts', c.id);
+    A.S.earnContracts = A.S.earnContracts.filter(c => c.accountId !== id);
     for (const n of A.S.portfolioNotes.filter(x => x.accountId === id)) await db.del('portfolioNotes', n.id);
     A.S.portfolioNotes = A.S.portfolioNotes.filter(n => n.accountId !== id);
     await db.del('brokerHoldings', id);
