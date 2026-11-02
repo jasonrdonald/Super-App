@@ -524,6 +524,7 @@ th.num .pf-th { justify-content: flex-end; }
 .rt-fill { fill: var(--rt); }
 .rt-off { fill: var(--border); }
 .rt-line { fill: none; stroke: var(--rt); stroke-width: 2.4; stroke-linecap: round; }
+.rt-mark { fill: none; stroke: var(--surface); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .rt-rail { stroke: var(--muted); stroke-width: 1.5; opacity: .6; }
 .rt-best, .rt-good { --rt: var(--good); }
 .rt-mid { --rt: var(--muted); }

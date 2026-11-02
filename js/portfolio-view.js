@@ -8,7 +8,7 @@ import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, un
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS, BACKUP_FILES, BACKUP_CONTENTS, BACKUP_LEAVES_OUT, BACKUP_NEEDS_NOTHING } from './disclosures.js';
-import { GROUPINGS, bandOf, orderBands, RATING_SCALES, momentumRating, growthRating, valuationRating, profitabilityRating } from './ratings.js';
+import { GROUPINGS, bandOf, orderBands, RATING_SCALES, momentumRating, growthRating, valuationRating, profitabilityRating, verdictRating } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
 const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Nippon MF', 'Aionion Capital', 'Zebpay', 'Blockchain Wallet', 'Coinbase Wallet', 'Other'];
@@ -2507,7 +2507,11 @@ const GROWTH_CURVES = {
   'Degrowth linear': 'M2 2L32 16', 'Degrowth exponential': 'M2 2C16 2 24 6 32 16',
 };
 
+const VERDICT_MARKS = { 'Must Buy': 'M12 9L17 4L22 9M12 14L17 9L22 14', Buy: 'M12 11.5L17 6.5L22 11.5', Hold: 'M12 7H22M12 11H22', Sell: 'M12 6.5L17 11.5L22 6.5', 'Must Sell': 'M12 4L17 9L22 4M12 9L17 14L22 9' };
+
 const RATING_ICONS = {
+  // A badge with arrows: two for the strongest calls, and bars to hold.
+  verdict: r => svgIcon(`<circle class="rt-fill" cx="17" cy="9" r="8.5"/><path class="rt-mark" d="${VERDICT_MARKS[r.label]}"/>`),
   // A rail from low to high, with a marker where the price sits.
   momentum: r => {
     const at = 3 + (r.rank - 1) * 7;
@@ -2532,8 +2536,8 @@ const ratingChip = (scale, r) => (r
   : '<span class="muted small">Not rated</span>');
 
 const RATE_COLUMNS = [
-  ['symbol', 'Ticker'], ['value', 'Market value'], ['perf1w', '1W'], ['perf1m', '1M'], ['perf3m', '3M'], ['perf6m', '6M'], ['perf1y', '1Y'], ['perf5y', '5Y'],
-  ...Object.entries(RATING_SCALES).map(([k, s]) => [k, s.label]),
+  ['symbol', 'Ticker'], ['verdict', 'Verdict'], ['value', 'Market value'], ['perf1w', '1W'], ['perf1m', '1M'], ['perf3m', '3M'], ['perf6m', '6M'], ['perf1y', '1Y'], ['perf5y', '5Y'],
+  ...Object.entries(RATING_SCALES).filter(([k]) => k !== 'verdict').map(([k, s]) => [k, s.label]),
 ];
 const rateSort = { key: 'value', dir: -1 };
 
@@ -2553,10 +2557,10 @@ function ratingReport() {
   const filters = reportFilters(null);
   const indian = brokers.flatMap(({ account, c }) => (isUsd(account) ? [] : c.lines.filter(l => l.group === 'Stocks' && perfType(account, l) === 'Indian stocks').map(l => ({ ...l, account }))));
   const sectors = A.S.market.find(m => m.symbol === SECTOR_PE_KEY)?.f ?? {};
-  const list = heldByTicker(indian).map(mergeLines).map(l => ({
-    ...l,
-    momentum: momentumRating(l), growth: growthRating(l), valuation: valuationRating(l, sectors[l.sector]), profitability: profitabilityRating(l),
-  }));
+  const list = heldByTicker(indian).map(mergeLines).map(l => {
+    const ratings = { momentum: momentumRating(l), growth: growthRating(l), valuation: valuationRating(l, sectors[l.sector]), profitability: profitabilityRating(l) };
+    return { ...l, ...ratings, verdict: verdictRating(ratings) };
+  });
   if (!list.length) return `${filters}<div class="empty">${icon('chart')}<p>No Indian stocks for this selection.</p></div>`;
   const sortValue = (l, key) => (RATING_SCALES[key] ? l[key]?.rank ?? -1 : l[key] ?? -Infinity);
   const rows = [...list].sort((a, b) => (rateSort.key === 'symbol' ? a.symbol.localeCompare(b.symbol) : sortValue(a, rateSort.key) - sortValue(b, rateSort.key)) * rateSort.dir);
@@ -2572,14 +2576,15 @@ function ratingReport() {
       <div class="rt-scales">${Object.keys(RATING_SCALES).map(k => ratingLegend(k, list)).join('')}</div>
     </section>
     <section class="panel"><h2>Your Indian stocks (${list.length})</h2>
-      <p class="muted small chart-note">Returns are each stock's own price change, not your purchase. These are rules applied to public figures, not advice. Hover over a rating for its rule.</p>
+      <p class="muted small chart-note">Returns are each stock's own price change, not your purchase. Verdicts and ratings are a fixed formula on public figures. They aren't investment advice, and they don't know your goals, tax or what you paid. Hover over a rating for its rule.</p>
       <div class="holdings-wrap"><table class="holdings rt-table">
         <thead><tr>${RATE_COLUMNS.map(head).join('')}</tr></thead>
         <tbody>${rows.map(l => `<tr>
           <th scope="row"><a href="${accountPath(l.holders[0].id)}/h/${encodeURIComponent(l.symbol)}" title="${A.esc(l.name)}">${A.esc(l.symbol)}</a></th>
+          <td>${ratingChip('verdict', l.verdict)}</td>
           <td class="num">${money(l.value)}</td>
           ${['perf1w', 'perf1m', 'perf3m', 'perf6m', 'perf1y', 'perf5y'].map(k => `<td class="num ${tone(l[k])}">${pct(l[k])}</td>`).join('')}
-          ${Object.keys(RATING_SCALES).map(k => `<td>${ratingChip(k, l[k])}</td>`).join('')}
+          ${Object.keys(RATING_SCALES).filter(k => k !== 'verdict').map(k => `<td>${ratingChip(k, l[k])}</td>`).join('')}
         </tr>`).join('')}</tbody>
       </table></div>
     </section>`;

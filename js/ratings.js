@@ -69,6 +69,11 @@ const away = (from, to) => Math.abs(to / from - 1) * 100;
 const NEAR = 1.05;
 
 export const RATING_SCALES = {
+  verdict: {
+    label: 'Verdict',
+    rule: 'A fixed formula, not advice. Each rating scores +2 for its best level to -2 for its worst, then Growth and Profitability count 30% each, Valuation 25% and Momentum 15%. Must Buy is +1.4 or more, Buy +0.7, Hold above -0.4, Sell above -1.1, and Must Sell below that. A company making a loss can\'t rate above Hold, nor an overvalued one above Buy. Needs at least three ratings.',
+    levels: ['Must Buy', 'Buy', 'Hold', 'Sell', 'Must Sell'],
+  },
   momentum: {
     label: 'Momentum',
     rule: 'Where the price sits: within 5% of its all-time high or low, or its 52-week high or low. Neutral is anywhere between.',
@@ -136,6 +141,21 @@ export function profitabilityRating(l) {
   const note = roe == null ? 'ROE not reported' : `ROE ${roe.toFixed(0)}%`;
   if (roe >= 20 && netMargin >= 10) return rated('profitability', 'Great', note);
   return rated('profitability', roe >= 12 ? 'Good' : 'Avg', note);
+}
+
+const VERDICT_WEIGHTS = { growth: 30, profitability: 30, valuation: 25, momentum: 15 };
+
+// Combines the ratings a stock has, so a missing one doesn't count as a bad one.
+export function verdictRating(l) {
+  const known = Object.keys(VERDICT_WEIGHTS).filter(k => l[k]);
+  if (known.length < 3) return null;
+  const score = known.reduce((n, k) => n + (2 - l[k].step / (l[k].count - 1) * 4) * VERDICT_WEIGHTS[k], 0)
+    / known.reduce((n, k) => n + VERDICT_WEIGHTS[k], 0);
+  const levels = RATING_SCALES.verdict.levels;
+  let step = score >= 1.4 ? 0 : score >= 0.7 ? 1 : score > -0.4 ? 2 : score > -1.1 ? 3 : 4;
+  if (l.profitability?.step >= 3) step = Math.max(step, 2);
+  if (l.valuation?.label === 'Overvalued') step = Math.max(step, 1);
+  return rated('verdict', levels[step], `Score ${score > 0 ? '+' : ''}${score.toFixed(2)} of 2`);
 }
 
 // Puts group names in reading order, with the catch-alls last.
