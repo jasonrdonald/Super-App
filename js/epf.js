@@ -1,3 +1,6 @@
+import { cleanPolicy } from './lic.js';
+import { cleanNpsAccount, cleanNpsStatement, cleanNpsEntry } from './nps.js';
+
 // EPF passbooks: reading a year's statement out of the PDF's text, and the sums
 // behind the Retirals pages. Only the employer's name, the last four digits of
 // the member ID and the money are kept: never the name, birth date or UAN.
@@ -169,12 +172,16 @@ const finite = v => (Number.isFinite(v) ? v : 0);
 const trio = v => (Array.isArray(v) && v.length === 3 ? v.map(finite) : [0, 0, 0]);
 const isDate = v => typeof v === 'string' && /^\d{4}-\d\d-\d\d$/.test(v);
 
+// An account is an EPF account, an LIC policy or an NPS account, told apart by kind.
 export function cleanRetiralAccount(x) {
   if (!x?.id) return null;
+  if (x.kind === 'lic') return cleanPolicy(x);
+  if (x.kind === 'nps') return cleanNpsAccount(x);
   return { id: text(x.id, 60), kind: 'epf', name: text(x.name, 80) || 'EPF', employer: text(x.employer, 120), memberTail: text(x.memberTail, 4).replace(/\D/g, ''), createdAt: finite(x.createdAt), updatedAt: finite(x.updatedAt) };
 }
 
 export function cleanRetiralStatement(x) {
+  if (x?.kind === 'nps') return cleanNpsStatement(x);
   if (!x?.id || !x.accountId || !Number.isInteger(x.fy)) return null;
   return {
     id: text(x.id, 80), accountId: text(x.accountId, 60), fy: x.fy,
@@ -185,8 +192,12 @@ export function cleanRetiralStatement(x) {
 }
 
 export function cleanRetiralEntry(x) {
+  if (String(x?.kind).startsWith('nps-')) return cleanNpsEntry(x);
   if (!x?.id || !x.accountId || !isDate(x.date)) return null;
-  const kinds = ['contribution', 'transfer', 'withdrawal', 'credit'];
+  const kinds = ['contribution', 'transfer', 'withdrawal', 'credit', 'premium'];
+  if (x.kind === 'premium') {
+    return { id: text(x.id, 160), accountId: text(x.accountId, 60), kind: 'premium', date: x.date, dueMonth: /^\d{4}-\d\d$/.test(x.dueMonth) ? x.dueMonth : x.date.slice(0, 7), amount: finite(x.amount), installments: Math.max(1, Math.round(finite(x.installments)) || 1), lateFee: finite(x.lateFee), updatedAt: finite(x.updatedAt) };
+  }
   return {
     id: text(x.id, 160), accountId: text(x.accountId, 60), fy: Number.isInteger(x.fy) ? x.fy : 0, date: x.date,
     wageMonth: /^\d{4}-\d\d$/.test(x.wageMonth) ? x.wageMonth : x.date.slice(0, 7),

@@ -399,7 +399,10 @@ function parseRoute(hash) {
   const p = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   if (!p.length) return { name: 'home' };
   if (p[0] === 's' && p[1] === 'payments') return { name: 'payments', section: p[1], page: p[2] || 'dashboard', id: p[3] };
-  if (p[0] === 's' && p[1] === 'retirals') return { name: 'retirals', section: p[1], page: p[2] === 'a' && p[3] ? 'account' : 'home', id: p[3] };
+  if (p[0] === 's' && p[1] === 'retirals') {
+    const page = p[2] === 'lic' ? 'lic-new' : p[2] === 'a' && p[3] ? (p[4] === 'edit' ? 'lic-edit' : 'account') : 'home';
+    return { name: 'retirals', section: p[1], page, id: p[3] };
+  }
   if (p[0] === 's' && p[1] === 'portfolio') {
     const base = { name: 'portfolio', section: p[1] };
     if (!p[2]) return { ...base, page: 'home' };

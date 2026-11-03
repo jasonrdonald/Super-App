@@ -30,7 +30,7 @@ function readObjects(bytes, text) {
       // The browser's inflater rejects stray bytes after the data, so this uses
       // the stated length, or trims the line break before endstream.
       const from = start + at + body.slice(at).indexOf('\n') + 1;
-      const length = obj.dict.match(/\/Length\s+(\d+)(?!\s+\d+\s+R)/);
+      const length = obj.dict.match(/\/Length\s+(\d+)\b(?!\s+\d+\s+R)/);
       let to = text.lastIndexOf('endstream', end);
       while (to > from && (text[to - 1] === '\n' || text[to - 1] === '\r')) to--;
       obj.raw = bytes.subarray(from, length ? Math.min(from + Number(length[1]), to) : to);
@@ -156,15 +156,24 @@ function* tokens(src) {
   }
 }
 
-// Walks one content stream, placing each piece of text where it's drawn.
+// Walks one content stream, placing each piece of text where it's drawn on the
+// page. Some PDFs move blocks with the graphics matrix and draw letter by letter,
+// so positions go through it, and each piece notes roughly how wide it is.
 function runs(src, fonts) {
   const out = [];
   const stack = [];
+  const saved = [];
+  let ctm = [1, 0, 0, 1, 0, 0];
   let font = null, size = 12, x = 0, y = 0, lineX = 0, lineY = 0, leading = 0, array = null;
-  const show = (value, scale) => {
+  let tm = [1, 0, 0, 1];
+  const show = value => {
     if (!font) return;
     const text = font(value);
-    if (text.trim()) out.push({ x, y: Math.round(y * scale), text });
+    if (!text) return;
+    const px = ctm[4] + x * ctm[0] + y * ctm[2];
+    const py = ctm[5] + x * ctm[1] + y * ctm[3];
+    const scale = Math.abs(ctm[0] * tm[0]) || 1;
+    out.push({ x: px, y: Math.round(py), text, size: size * scale, w: text.length * size * scale * 0.5 });
   };
   for (const t of tokens(src)) {
     if (t.open) { array = []; continue; }
@@ -173,14 +182,21 @@ function runs(src, fonts) {
     if (!t.op) { stack.push(t); continue; }
     const nums = stack.filter(s => s.num != null).map(s => s.num);
     switch (t.op) {
-      case 'BT': x = lineX = 0; y = lineY = 0; break;
+      case 'q': saved.push(ctm); break;
+      case 'Q': ctm = saved.pop() ?? ctm; break;
+      case 'cm': {
+        const [a, b, c, d, e, f] = nums;
+        ctm = [a * ctm[0] + b * ctm[2], a * ctm[1] + b * ctm[3], c * ctm[0] + d * ctm[2], c * ctm[1] + d * ctm[3], e * ctm[0] + f * ctm[2] + ctm[4], e * ctm[1] + f * ctm[3] + ctm[5]];
+        break;
+      }
+      case 'BT': x = lineX = 0; y = lineY = 0; tm = [1, 0, 0, 1]; break;
       case 'Tf': font = fonts.get(stack.find(s => s.name)?.name) ?? null; size = nums.at(-1) ?? size; break;
-      case 'Tm': x = lineX = nums[4]; y = lineY = nums[5]; break;
+      case 'Tm': tm = nums.slice(0, 4); x = lineX = nums[4]; y = lineY = nums[5]; break;
       case 'Td': case 'TD': x = lineX += nums[0]; y = lineY += nums[1]; if (t.op === 'TD') leading = -nums[1]; break;
       case 'TL': leading = nums[0]; break;
       case 'T*': x = lineX; y = lineY -= leading; break;
-      case 'Tj': case "'": case '"': if (t.op !== 'Tj') { x = lineX; y = lineY -= leading; } show(stack.filter(s => s.str != null).at(-1)?.str ?? '', 1); break;
-      case 'TJ': show((stack.find(s => s.array)?.array ?? []).map(p => (p === ' ' ? null : p)).reduce((s, p) => s + (p ?? ''), ''), 1); break;
+      case 'Tj': case "'": case '"': if (t.op !== 'Tj') { x = lineX; y = lineY -= leading; } show(stack.filter(s => s.str != null).at(-1)?.str ?? ''); break;
+      case 'TJ': show((stack.find(s => s.array)?.array ?? []).map(p => (p === ' ' ? null : p)).reduce((s, p) => s + (p ?? ''), '')); break;
       default: break;
     }
     stack.length = 0;
@@ -207,8 +223,17 @@ export async function pdfLines(buffer) {
       const key = [...rows.keys()].find(k => Math.abs(k - r.y) <= 2) ?? r.y;
       rows.set(key, [...(rows.get(key) ?? []), r]);
     }
+    // Letters drawn one at a time join into words when close together. Anything
+    // drawn as a longer piece keeps a space around it.
     for (const y of [...rows.keys()].sort((a, b) => b - a)) {
-      lines.push(rows.get(y).sort((a, b) => a.x - b.x).map(r => r.text.trim()).join(' ').replace(/\s+/g, ' '));
+      let line = '', end = -Infinity, single = false;
+      for (const r of rows.get(y).sort((a, b) => a.x - b.x)) {
+        const glued = single && r.text.length === 1 && r.x - end <= r.size * 0.3;
+        line += (line && !glued ? ' ' : '') + r.text;
+        end = r.x + r.w;
+        single = r.text.length === 1;
+      }
+      if (line.trim()) lines.push(line.replace(/\s+/g, ' ').trim());
     }
   }
   return lines;
