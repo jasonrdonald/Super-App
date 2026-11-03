@@ -1,6 +1,7 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
+import { shortAmounts, shortMoney } from './format.js';
 import {
   CATEGORIES, FREQUENCIES, WHEN, CHANNELS, MODES,
   today, addDays, daysBetween, parseDate, monthRange, yearRange,
@@ -34,7 +35,8 @@ export function initPayments(helpers) {
 
 const paymentById = id => A.S.payments.find(p => p.id === id);
 const records = () => A.S.paymentRecords;
-const money = v => new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, minimumFractionDigits: Number.isInteger(v) ? 0 : 2, maximumFractionDigits: 2 }).format(v);
+const money = v => (shortAmounts() ? shortMoney(v, CONFIG.currency) : fullMoney(v));
+const fullMoney = v => new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, minimumFractionDigits: Number.isInteger(v) ? 0 : 2, maximumFractionDigits: 2 }).format(v);
 const fullDate = s => A.fmt(parseDate(s), { dateStyle: 'medium' });
 const shortDate = s => A.fmt(parseDate(s), { month: 'short', day: 'numeric' });
 const ordinal = n => `${n}${['th', 'st', 'nd', 'rd'][(n % 100 > 10 && n % 100 < 14) || n % 10 > 3 ? 0 : n % 10]}`;

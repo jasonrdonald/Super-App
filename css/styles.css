@@ -514,6 +514,43 @@ th.num .pf-th { justify-content: flex-end; }
 .holdings thead th:first-child { z-index: 2; }
 .holdings.pf-summary thead th { padding: 8px 10px; }
 
+/* ---------- retirals ---------- */
+
+.ret-out td { color: var(--danger); }
+
+/* ---------- milestones ---------- */
+
+.goal-controls { display: grid; gap: 16px 22px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+.goal-field { display: grid; gap: 6px; align-content: start; }
+.goal-field label { display: flex; justify-content: space-between; gap: 8px; font-size: .84rem; color: var(--muted); }
+.goal-field output { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.goal-field input[type=range] { width: 100%; accent-color: var(--accent); }
+.goal-field .input { height: 40px; padding: 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; }
+.goal-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.goal-big { margin: 0; font-size: 1.12rem; line-height: 1.5; }
+.goal-big b { color: var(--accent); }
+.goal-insights { display: grid; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; font-size: .86rem; }
+.goal-insights li { display: flex; gap: 8px; align-items: flex-start; }
+.goal-insights .i { width: 16px; height: 16px; flex: none; margin-top: 2px; color: var(--accent); }
+.goal-cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: 14px; }
+.goal-card { display: grid; gap: 3px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.goal-card.reached { border-color: var(--good); }
+.goal-name { font-size: .8rem; font-weight: 650; color: var(--muted); }
+.goal-time { font-size: 1.3rem; font-weight: 700; }
+.goal-when, .goal-note { font-size: .76rem; color: var(--muted); }
+.goal-bar { display: block; height: 6px; margin: 6px 0 2px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.goal-bar i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.goal-card.reached .goal-bar i { background: var(--good); }
+.g-zero { stroke: var(--muted); stroke-width: 1; }
+.goal-line { fill: none; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.goal-plan { stroke: var(--accent); }
+.goal-bare { stroke: var(--muted); stroke-width: 2; }
+.goal-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+.goal-key-plan { background: var(--accent); }
+.goal-key-bare { background: var(--muted); }
+.goal-grid tr.goal-pick th, .goal-grid tr.goal-pick td { background: var(--accent-soft); font-weight: 650; }
+.goal-rate { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 650; cursor: pointer; }
+
 /* ---------- ratings ---------- */
 
 .rt { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }

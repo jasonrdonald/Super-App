@@ -7,6 +7,8 @@ import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } 
 import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
 import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote as cleanPortfolioNote } from './portfolio.js';
+import { initRetirals, retiralsView, retiralsAction, retiralsRouteValid, retiralsNav, retiralsTileText } from './retirals-view.js';
+import { cleanRetiralAccount, cleanRetiralEntry, cleanRetiralStatement } from './epf.js';
 import { initPortfolio, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTileText, portfolioChanged } from './portfolio-view.js';
 
 const TRASH_DAYS = 30;
@@ -40,6 +42,9 @@ const S = {
   earnContracts: [],
   transfers: [],
   brokerFees: [],
+  retiralAccounts: [],
+  retiralEntries: [],
+  retiralStatements: [],
   priceMonths: [],
   market: [],
   open: new Set(ls.get('open', [])),
@@ -233,6 +238,9 @@ const snapshot = () => ({
   earnContracts: S.earnContracts,
   transfers: S.transfers,
   brokerFees: S.brokerFees,
+  retiralAccounts: S.retiralAccounts,
+  retiralEntries: S.retiralEntries,
+  retiralStatements: S.retiralStatements,
 });
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -296,7 +304,8 @@ async function importData(data) {
   await db.putMany('notebooks', nbChanged);
   await db.putMany('notes', noteChanged);
   for (const [store, clean] of [['paymentCategories', cleanCategory], ['paymentTypes', cleanType], ['payments', cleanPayment], ['paymentRecords', cleanRecord],
-    ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote], ['earnContracts', cleanContract], ['transfers', cleanTransfer], ['brokerFees', cleanFee]]) {
+    ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote], ['earnContracts', cleanContract], ['transfers', cleanTransfer], ['brokerFees', cleanFee],
+    ['retiralAccounts', cleanRetiralAccount], ['retiralEntries', cleanRetiralEntry], ['retiralStatements', cleanRetiralStatement]]) {
     const items = (Array.isArray(data[store]) ? data[store] : []).map(clean).filter(Boolean);
     await db.putMany(store, items.map(x => merge(S[store], x, true)).filter(Boolean));
   }
@@ -355,11 +364,12 @@ function parseRoute(hash) {
   const p = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   if (!p.length) return { name: 'home' };
   if (p[0] === 's' && p[1] === 'payments') return { name: 'payments', section: p[1], page: p[2] || 'dashboard', id: p[3] };
+  if (p[0] === 's' && p[1] === 'retirals') return { name: 'retirals', section: p[1], page: p[2] === 'a' && p[3] ? 'account' : 'home', id: p[3] };
   if (p[0] === 's' && p[1] === 'portfolio') {
     const base = { name: 'portfolio', section: p[1] };
     if (!p[2]) return { ...base, page: 'home' };
     if (p[2] === 'add') return { ...base, page: 'add' };
-    if (p[2] === 'reports') return { ...base, page: 'reports', tab: p[3] };
+    if (p[2] === 'reports' || p[2] === 'analysis') return { ...base, page: p[2], tab: p[3] };
     if (p[2] === 'transfers') return { ...base, page: 'transfers' };
     if (p[2] === 'consolidated') return { ...base, page: 'consolidated' };
     if (p[2] === 'data' || p[2] === 'disclosure') return { ...base, page: p[2] };
@@ -380,7 +390,7 @@ function parseRoute(hash) {
   return null;
 }
 
-const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id)) && (r.name !== 'payments' || payRouteValid(r)) && (r.name !== 'portfolio' || portfolioRouteValid(r));
+const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id)) && (r.name !== 'payments' || payRouteValid(r)) && (r.name !== 'retirals' || retiralsRouteValid(r)) && (r.name !== 'portfolio' || portfolioRouteValid(r));
 
 function go(hash, replace = false) {
   if (replace) location.replace(hash);
@@ -450,6 +460,7 @@ function renderView() {
   else if (r.name === 'section') sectionView(sectionById(r.section));
   else if (r.name === 'payments') paymentsView(r);
   else if (r.name === 'portfolio') portfolioView(r);
+  else if (r.name === 'retirals') retiralsView(r);
   else if (r.name === 'settings') settingsView();
   else listView(r);
 }
@@ -514,8 +525,8 @@ function renderDrawer() {
   }
 
   const payPage = ['add', 'edit', 'p'].includes(r.page) ? 'manage' : r.page;
-  const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.app ? portfolioNav() : [];
-  const current = sec?.id === 'payments' ? payPage : ['reports', 'transfers', 'consolidated', 'data', 'disclosure'].includes(r.page) ? r.page : r.id ?? 'home';
+  const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.id === 'retirals' ? retiralsNav() : sec?.app ? portfolioNav() : [];
+  const current = sec?.id === 'payments' ? payPage : ['reports', 'analysis', 'transfers', 'consolidated', 'data', 'disclosure'].includes(r.page) ? r.page : r.id ?? 'home';
   const pageLink = p => row(current === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${esc(p.name)}</span></a>`);
   // Open by default, so the stored key means closed. A closed group marks the page inside it.
   const pageGroup = p => {
@@ -563,6 +574,7 @@ function homeView() {
   const dues = attentionNow();
   const tileCount = s => {
     if (s.id === 'payments') return dues.length ? `${dues.length} to pay` : '';
+    if (s.id === 'retirals') return S.retiralAccounts.length ? retiralsTileText() : '';
     if (s.app) return S.brokerAccounts.length ? portfolioTileText() : '';
     const k = countIn(s.id);
     return k ? plural(k, 'note') : '';
@@ -1095,6 +1107,7 @@ function settingsView() {
         <div class="seg wide" role="group" aria-label="Theme">
           ${['system', 'light', 'dark'].map(t => `<button data-theme-set="${t}" aria-pressed="${t === theme}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}
         </div>
+        <label class="switch"><input type="checkbox" id="short-amounts"${ls.get('shortAmounts', false) ? ' checked' : ''}><span>Short amounts, as ₹2.4L for ₹2,40,000, ₹10K for ₹10,000 and ₹1.5Cr for ₹1,50,00,000</span></label>
       </section>
       <section>
         <h2>On this device</h2>
@@ -1115,6 +1128,7 @@ function settingsView() {
       <p class="muted center small">SuperApp v${VERSION}</p>
     </div></div>`;
 
+  $('#short-amounts').addEventListener('change', e => { ls.set('shortAmounts', e.target.checked); renderDrawer(); });
   view.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('click', () => {
     ls.set('theme', b.dataset.themeSet);
     applyTheme();
@@ -1192,6 +1206,7 @@ view.addEventListener('click', async e => {
   const n = r.name === 'note' ? noteById(r.id) : null;
   if (b.dataset.act.startsWith('pay-')) return paymentAction(b);
   if (b.dataset.act.startsWith('pf-')) return portfolioAction(b);
+  if (b.dataset.act.startsWith('ret-')) return retiralsAction(b);
   switch (b.dataset.act) {
     case 'drawer': return openDrawer();
     case 'back': return goBack();
@@ -1276,8 +1291,9 @@ async function init() {
   const helpers = { S, $, ls, view, esc, uid, fmt, relDate, plural, toast, ask, confirmDlg, choose, go, persist, refresh, markDirty, upButton, menuButton, downloadFile };
   initPayments(helpers);
   initPortfolio(helpers);
+  initRetirals(helpers);
   try {
-    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'market', 'priceMonths'];
+    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'retiralAccounts', 'retiralEntries', 'retiralStatements', 'market', 'priceMonths'];
     (await Promise.all(stores.map(db.all))).forEach((rows, i) => { S[stores[i]] = rows; });
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;
