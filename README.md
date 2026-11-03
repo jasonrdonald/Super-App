@@ -13,7 +13,7 @@ An offline-first PWA for phones with Markdown notes and a recurring payments tra
 - **Supported Markdown**: headings, emphasis, `~~strike~~`, `==highlight==`, lists, task lists, quotes, code, tables, links, images and auto-links. Raw HTML is always escaped.
 - **Dark theme**: follows the system setting, or you can force Light or Dark in Settings.
 - **Local storage**: notes are saved on the device in IndexedDB. The app asks the browser for *persistent* storage so they aren't evicted. Everything works offline.
-- **Export / import**: download or share a single `.json` backup, or share one note as `.md`. Importing merges the backup: the newer copy of each note wins and nothing is deleted.
+- **Export / import**: download or share a single `.json` backup, or share one note as `.md`. Importing, from a file or Google Drive, asks whether to merge the backup, where the newer copy of each item wins and nothing is deleted, or to replace everything on the device with it. Replacing first downloads a copy of the current data, and keeps public market data.
 - **Google Drive backup** with Google sign-in: back up or restore one file (`superapp-notes-backup.json`), and optionally back up automatically after changes.
 - **Trash**: deleted notes are restorable for 30 days and then purged automatically. You can also empty the trash by hand.
 

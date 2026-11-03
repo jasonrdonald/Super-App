@@ -275,10 +275,45 @@ function cleanNote(x) {
 
 // Merge a backup into local data. For items that exist on both sides the
 // most recently updated version wins; nothing local is deleted.
-async function importData(data) {
-  if (!data || data.app !== 'superapp-notes' || !Array.isArray(data.notebooks) || !Array.isArray(data.notes)) {
-    throw new Error('This file is not a SuperApp backup.');
+const isBackup = data => data?.app === 'superapp-notes' && Array.isArray(data.notebooks) && Array.isArray(data.notes);
+
+// Everything a backup holds, which Replace clears. Public market data isn't in a
+// backup, so it stays.
+const BACKED_UP = Object.keys(snapshot()).filter(k => Array.isArray(snapshot()[k]));
+
+async function clearBackedUp() {
+  for (const store of BACKED_UP) {
+    await db.clear(store);
+    S[store] = [];
   }
+  portfolioChanged();
+}
+
+// Asks whether to merge the backup in or replace this device's data with it. When
+// replacing, a copy of what's here downloads first. Resolves to false if cancelled.
+async function chooseImport(source) {
+  const pick = await choose(`Import ${source}`, [
+    { icon: 'upload', label: 'Merge with what\'s on this device' },
+    { icon: 'trash', label: 'Replace everything on this device', danger: true },
+  ]);
+  if (pick === 0) return 'merge';
+  if (pick !== 1) return false;
+  const ok = await confirmDlg('Replace everything?', 'Every note, payment, broker account and retiral on this device is deleted and replaced by the backup. A copy of what\'s here now downloads first, so you can bring it back. Public market data stays.', 'Replace');
+  return ok ? 'replace' : false;
+}
+
+async function runImport(data, how) {
+  if (!isBackup(data)) throw new Error('This file is not a SuperApp backup.');
+  if (how === 'replace') {
+    const copy = backupFile();
+    downloadFile(new File([copy], copy.name.replace('.json', '-before-replace.json'), { type: copy.type }));
+    await clearBackedUp();
+  }
+  return importData(data);
+}
+
+async function importData(data) {
+  if (!isBackup(data)) throw new Error('This file is not a SuperApp backup.');
   let added = 0, updated = 0;
   const merge = (list, item, count) => {
     const cur = list.find(x => x.id === item.id);
@@ -1140,9 +1175,11 @@ function settingsView() {
     if (!file) return;
     try {
       const data = JSON.parse(await file.text());
-      if (!await confirmDlg('Import backup?', `Merge “${file.name}” into this device? Newer versions of each item win; nothing is deleted.`, 'Import', false)) return;
-      const { added, updated } = await importData(data);
-      toast(`Imported: ${added} new, ${updated} updated`);
+      if (!isBackup(data)) throw new Error('This file is not a SuperApp backup.');
+      const how = await chooseImport(`“${file.name}”`);
+      if (!how) return;
+      const { added, updated } = await runImport(data, how);
+      toast(how === 'replace' ? 'Replaced everything with the backup' : `Imported: ${added} new, ${updated} updated`);
     } catch (err) {
       toast(err instanceof SyntaxError ? 'That file is not valid JSON.' : err.message);
     }
@@ -1248,9 +1285,11 @@ view.addEventListener('click', async e => {
         const res = await drive.download();
         if (!res) return toast('No backup found in your Drive yet.');
         const when = relDate(new Date(res.file.modifiedTime).getTime());
-        if (!await confirmDlg('Restore from Drive?', `Merge the Drive backup from ${when} into this device? Newer versions of each item win; nothing is deleted.`, 'Restore', false)) return;
-        const { added, updated } = await importData(res.data);
-        toast(`Restored: ${added} new, ${updated} updated`);
+        if (!isBackup(res.data)) return toast('The Drive file is not a SuperApp backup.');
+        const how = await chooseImport(`the Drive backup from ${when}`);
+        if (!how) return;
+        const { added, updated } = await runImport(res.data, how);
+        toast(how === 'replace' ? 'Replaced everything with the Drive backup' : `Restored: ${added} new, ${updated} updated`);
       });
   }
 });
