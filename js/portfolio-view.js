@@ -7,6 +7,7 @@ import { parseBrokerFile } from './portfolio-import.js';
 import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, setOffline, EVENT_GAP_MS } from './market.js';
 import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, unzipFiles } from './public-data.js';
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
+import { createMilestones } from './milestones.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS, BACKUP_FILES, BACKUP_CONTENTS, BACKUP_LEAVES_OUT, BACKUP_NEEDS_NOTHING } from './disclosures.js';
 import { GROUPINGS, bandOf, orderBands, RATING_SCALES, momentumRating, growthRating, valuationRating, profitabilityRating, verdictRating } from './ratings.js';
@@ -2618,15 +2619,9 @@ function ratingReport() {
 
 /* ---------- milestones ---------- */
 
-const GOALS = [[1e7, '₹1 Cr'], [2e7, '₹2 Cr'], [5e7, '₹5 Cr'], [1e8, '₹10 Cr']];
-const GOAL_RATES = [6, 8, 10, 12, 15, 18, 20];
-const MAX_MONTHS = 600;
-const goalPlan = () => A.ls.get('pfGoal', {});
-const crText = v => `₹${Number((v / 1e7).toFixed(2))} Cr`;
-
 // Today's value, your XIRR, and what you've added a month over the past year, as
-// a starting point for the sliders.
-function goalStart() {
+// a starting point for the sliders. Net worth starts from this too.
+export function portfolioGoalStart() {
   const total = portfolioTotal();
   const today = new Date().toISOString().slice(0, 10);
   const yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
@@ -2638,204 +2633,35 @@ function goalStart() {
   return { value: total.value, xirr: xirrNow, monthly: Math.max(0, Math.round(added / 12 / 1000) * 1000) };
 }
 
-const goalSettings = start => {
-  const plan = goalPlan();
-  return { cagr: plan.cagr ?? start.xirr ?? 12, monthly: plan.monthly ?? start.monthly, stepUp: plan.stepUp ?? 0, custom: plan.custom ?? 0 };
+// Each broker's value today in rupees, for Net worth.
+export const portfolioParts = () => {
+  const rate = fxRate();
+  return accounts().map(a => {
+    const { lines } = computed(a);
+    const value = isUsd(a) ? (rate ? summarizeAll(lines.map(l => inRupees(l, rate))).value : null) : summarizeAll(lines).value;
+    return { id: a.id, name: a.name, value, href: accountPath(a.id) };
+  });
 };
 
-// Grows month by month: the return compounds, and the monthly amount rises each year by the step-up.
-function monthsTo(target, start, { cagr, monthly, stepUp }) {
-  if (start >= target) return 0;
-  const rate = (1 + cagr / 100) ** (1 / 12) - 1;
-  let value = start, add = monthly;
-  for (let m = 1; m <= MAX_MONTHS; m++) {
-    value = value * (1 + rate) + add;
-    if (value >= target) return m;
-    if (m % 12 === 0) add *= 1 + stepUp / 100;
-  }
-  return null;
-}
-
-function projection(start, { cagr, monthly, stepUp }, months) {
-  const rate = (1 + cagr / 100) ** (1 / 12) - 1;
-  const values = [start];
-  let add = monthly;
-  for (let m = 1; m <= months; m++) {
-    values.push(values[m - 1] * (1 + rate) + add);
-    if (m % 12 === 0) add *= 1 + stepUp / 100;
-  }
-  return values;
-}
-
-// The yearly return that reaches the target in the given months, found by halving.
-function rateNeeded(target, start, plan, months) {
-  let low = -20, high = 80;
-  if (monthsTo(target, start, { ...plan, cagr: high }) > months) return null;
-  for (let i = 0; i < 40; i++) {
-    const mid = (low + high) / 2;
-    const m = monthsTo(target, start, { ...plan, cagr: mid });
-    if (m != null && m <= months) high = mid; else low = mid;
-  }
-  return high;
-}
-
-const spanText = m => (m === 0 ? 'Reached' : m == null ? 'Over 50 years' : [Math.floor(m / 12) && `${Math.floor(m / 12)} yr`, m % 12 && `${m % 12} mo`].filter(Boolean).join(' '));
-const shortSpan = m => (m === 0 ? 'Done' : m == null ? '50+' : `${(m / 12).toFixed(1)} yrs`);
-const monthsAhead = m => {
-  const d = new Date();
-  d.setMonth(d.getMonth() + m);
-  return A.fmt(d, { month: 'short', year: 'numeric' });
-};
-
-const goalTargets = plan => [...GOALS, ...(plan.custom > 0 ? [[plan.custom * 1e7, `${crText(plan.custom * 1e7)}, your goal`]] : [])]
-  .sort((a, b) => a[0] - b[0]);
-
-function goalOutputs(start, plan) {
-  const targets = goalTargets(plan);
-  const times = targets.map(([target]) => monthsTo(target, start.value, plan));
-  const bare = targets.map(([target]) => monthsTo(target, start.value, { ...plan, monthly: 0, stepUp: 0 }));
-  const next = targets.findIndex(([target]) => target > start.value);
-  const lead = next >= 0 ? times[next] : null;
-  const faster = next >= 0 && times[next] != null ? monthsTo(targets[next][0], start.value, { ...plan, cagr: plan.cagr + 1 }) : null;
-  const needed = next >= 0 ? rateNeeded(targets[next][0], start.value, plan, 60) : null;
-  const insights = next < 0 ? [] : [
-    bare[next] !== times[next] && plan.monthly > 0 ? `Investing ${money(plan.monthly)} a month gets you to ${targets[next][1]} ${spanText((bare[next] ?? MAX_MONTHS) - (times[next] ?? MAX_MONTHS))} sooner than growth alone.` : '',
-    faster != null && times[next] - faster > 0 ? `Each extra 1% a year brings ${targets[next][1]} about ${spanText(times[next] - faster)} closer.` : '',
-    needed != null && (times[next] == null || times[next] > 60) ? `To reach ${targets[next][1]} within 5 years at this investment, you'd need about ${needed.toFixed(1)}% a year.` : '',
-  ].filter(Boolean);
-  const rates = [...new Set([...GOAL_RATES, plan.cagr])].sort((a, b) => a - b);
-  return `
-    <section class="panel goal-lead">
-      ${next < 0 ? `<p class="goal-big">You've passed every milestone here. Set your own goal below.</p>`
-        : `<p class="goal-big">At <b>${plan.cagr}%</b> a year${plan.monthly ? `, adding <b>${money(plan.monthly)}</b> a month` : ''}, you reach <b>${targets[next][1]}</b> ${lead == null ? '<b>in over 50 years</b>' : `in <b>${spanText(lead)}</b>, by <b>${monthsAhead(lead)}</b>`}.</p>`}
-      ${insights.length ? `<ul class="goal-insights">${insights.map(t => `<li>${icon('chart')}<span>${t}</span></li>`).join('')}</ul>` : ''}
-    </section>
-    <div class="goal-cards">${targets.map(([target, label], i) => {
-      const done = Math.min(start.value / target * 100, 100);
-      return `<div class="goal-card${times[i] === 0 ? ' reached' : ''}">
-        <span class="goal-name">${A.esc(label)}</span>
-        <span class="goal-time">${spanText(times[i])}</span>
-        <span class="goal-when">${times[i] === 0 ? 'Already there' : times[i] == null ? 'Not within 50 years' : `By ${monthsAhead(times[i])}`}</span>
-        <span class="goal-bar" role="img" aria-label="${done.toFixed(0)}% of the way"><i style="width:${done}%"></i></span>
-        <span class="goal-note">${done.toFixed(0)}% there${times[i] && bare[i] !== times[i] ? ` · ${shortSpan(bare[i])} with no new money` : ''}</span>
-      </div>`;
-    }).join('')}</div>
-    <section class="panel"><h2>Your path</h2>
-      <div class="g-legend"><span><i class="g-key goal-key-plan"></i>With your monthly investment</span><span><i class="g-key goal-key-bare"></i>Growth alone</span></div>
-      <div class="pf-growth" id="g-chart"></div>
-    </section>
-    <section class="panel"><h2>What if the return were different?</h2>
-      <p class="muted small chart-note">Years to each milestone at your monthly investment and step-up. Your chosen return is highlighted.</p>
-      <div class="holdings-wrap"><table class="holdings pf-summary goal-grid">
-        <thead><tr><th>Return a year</th>${targets.map(([, label]) => `<th class="num">${A.esc(label.replace(', your goal', ''))}</th>`).join('')}</tr></thead>
-        <tbody>${rates.map(rate => `<tr class="${rate === plan.cagr ? 'goal-pick' : ''}"><th scope="row"><button class="goal-rate" data-cagr="${rate}">${rate}%</button></th>${targets.map(([target]) => `<td class="num">${shortSpan(monthsTo(target, start.value, { ...plan, cagr: rate }))}</td>`).join('')}</tr>`).join('')}</tbody>
-      </table></div>
-    </section>`;
-}
-
-function goalsReport() {
-  const start = goalStart();
-  const plan = goalSettings(start);
-  if (!(start.value > 0)) return `<div class="empty">${icon('chart')}<p>Load your brokers first, so there's a value to grow from.</p></div>`;
-  const presets = [...(start.xirr != null ? [[start.xirr, `Your XIRR ${start.xirr}%`]] : []), [8, '8%'], [10, '10%'], [12, '12%'], [15, '15%']];
-  return `
-    <div class="stats">
+function goalsPage() {
+  const start = portfolioGoalStart();
+  return createMilestones(A, {
+    money, key: 'pfGoal', start: { assets: start.value, xirr: start.xirr, monthly: start.monthly },
+    empty: `<div class="empty">${icon('chart')}<p>Load your brokers first, so there's a value to grow from.</p></div>`,
+    stats: `<div class="stats">
       ${stat(`Portfolio today${info('goals')}`, money(start.value), 'All brokers, in rupees')}
       ${stat('Your XIRR so far', pct(start.xirr), 'Annual return, all time')}
       ${stat('Added a month', money(start.monthly), 'Average over the past year')}
-    </div>
-    <section class="panel goal-controls">
-      <div class="goal-field">
-        <label for="g-cagr">Expected return a year <output id="g-cagr-out">${plan.cagr}%</output></label>
-        <input type="range" id="g-cagr" min="0" max="30" step="0.5" value="${plan.cagr}">
-        <div class="goal-presets">${presets.map(([v, l]) => `<button class="btn sm" data-cagr="${v}">${l}</button>`).join('')}</div>
-      </div>
-      <div class="goal-field">
-        <label for="g-monthly">Monthly investment <output id="g-monthly-out">${money(plan.monthly)}</output></label>
-        <input type="range" id="g-monthly" min="0" max="500000" step="5000" value="${plan.monthly}">
-        <input class="input" type="number" id="g-monthly-exact" min="0" step="1000" value="${plan.monthly}" aria-label="Exact monthly investment">
-      </div>
-      <div class="goal-field">
-        <label for="g-step">Yearly increase in investment <output id="g-step-out">${plan.stepUp}%</output></label>
-        <input type="range" id="g-step" min="0" max="25" step="1" value="${plan.stepUp}">
-      </div>
-      <div class="goal-field">
-        <label for="g-custom">Your own goal, in crores</label>
-        <input class="input" type="number" id="g-custom" min="0" step="0.5" value="${plan.custom || ''}" placeholder="e.g. 3">
-      </div>
-    </section>
-    <div id="g-out">${goalOutputs(start, plan)}</div>
-    <p class="muted small chart-note">Assumes the same return every year, with investments made monthly. Real returns rise and fall, so treat these dates as rough guides, not a forecast or advice. Today's value includes every broker, crypto and US holdings at today's dollar rate.</p>`;
-}
-
-function drawGoalChart(start, plan) {
-  const box = A.$('#g-chart');
-  if (!box) return;
-  const targets = goalTargets(plan);
-  const last = targets.map(([t]) => monthsTo(t, start.value, plan)).filter(m => m != null).at(-1) ?? 120;
-  const months = Math.min(MAX_MONTHS, Math.max(120, Math.ceil((last + 12) / 12) * 12));
-  const lines = [['plan', projection(start.value, plan, months)], ['bare', projection(start.value, { ...plan, monthly: 0, stepUp: 0 }, months)]];
-  const w = box.clientWidth, narrow = w < 560, h = narrow ? 240 : 300;
-  const m = { l: 58, r: 14, t: 14, b: 26 };
-  const x = i => m.l + i / months * (w - m.l - m.r);
-  const top = Math.max(...lines[0][1], targets.at(-1)[0]) * 1.05;
-  const y = v => m.t + (1 - Math.min(v, top) / top) * (h - m.t - m.b);
-  const year = new Date().getFullYear();
-  const every = Math.ceil(months / 12 / (narrow ? 4 : 8));
-  box.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-    ${targets.map(([t, label]) => `<line class="g-grid" x1="${m.l}" x2="${w - m.r}" y1="${y(t)}" y2="${y(t)}"/><text class="g-axis" x="${m.l - 6}" y="${y(t) + 4}" text-anchor="end">${A.esc(label.replace(', your goal', ''))}</text>`).join('')}
-    <line class="g-zero" x1="${m.l}" x2="${w - m.r}" y1="${y(0)}" y2="${y(0)}"/>
-    ${Array.from({ length: Math.floor(months / 12) + 1 }, (_, i) => i).filter(i => i % every === 0).map(i => `<text class="g-axis" x="${x(i * 12)}" y="${h - 8}" text-anchor="${i ? 'middle' : 'start'}">${year + i}</text>`).join('')}
-    ${lines.map(([id, values]) => `<path class="goal-line goal-${id}" d="${values.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join('')}"/>`).join('')}
-    ${targets.map(([t]) => monthsTo(t, start.value, plan)).map(mo => (mo ? `<circle class="goal-dot" cx="${x(mo)}" cy="${y(lines[0][1][mo])}" r="5"/>` : '')).join('')}
-    <line class="g-cross" y1="${m.t}" y2="${h - m.b}" hidden/>
-  </svg><div class="g-tip" hidden></div>`;
-  const tip = box.querySelector('.g-tip'), cross = box.querySelector('.g-cross');
-  box.onpointermove = e => {
-    const i = Math.round(Math.min(Math.max((e.clientX - box.getBoundingClientRect().left - m.l) / (w - m.l - m.r), 0), 1) * months);
-    cross.setAttribute('x1', x(i));
-    cross.setAttribute('x2', x(i));
-    cross.removeAttribute('hidden');
-    tip.hidden = false;
-    tip.innerHTML = `<strong>${monthsAhead(i)}</strong><span>With your investment ${money(lines[0][1][i])}</span><span>Growth alone ${money(lines[1][1][i])}</span>`;
-    tip.style.left = `${Math.min(Math.max(x(i) - tip.offsetWidth / 2, 0), w - tip.offsetWidth)}px`;
-  };
-  box.onpointerleave = () => { tip.hidden = true; cross.setAttribute('hidden', ''); };
-}
-
-// The sliders redraw only the results, so typing and dragging stay smooth.
-function bindGoals() {
-  const start = goalStart();
-  if (!(start.value > 0)) return;
-  const read = () => ({
-    cagr: Number(A.$('#g-cagr').value), monthly: Number(A.$('#g-monthly-exact').value) || 0,
-    stepUp: Number(A.$('#g-step').value), custom: Number(A.$('#g-custom').value) || 0,
+    </div>`,
+    note: 'Assumes the same return every year, with investments made monthly. Real returns rise and fall, so treat these dates as rough guides, not a forecast or advice. Today\'s value includes every broker, crypto and US holdings at today\'s dollar rate.',
   });
-  const update = () => {
-    const plan = read();
-    A.ls.set('pfGoal', plan);
-    A.$('#g-cagr-out').textContent = `${plan.cagr}%`;
-    A.$('#g-monthly-out').textContent = money(plan.monthly);
-    A.$('#g-step-out').textContent = `${plan.stepUp}%`;
-    A.$('#g-out').innerHTML = goalOutputs(start, plan);
-    drawGoalChart(start, plan);
-  };
-  A.$('#g-cagr').addEventListener('input', update);
-  A.$('#g-step').addEventListener('input', update);
-  A.$('#g-custom').addEventListener('input', update);
-  A.$('#g-monthly').addEventListener('input', e => { A.$('#g-monthly-exact').value = e.target.value; update(); });
-  A.$('#g-monthly-exact').addEventListener('input', e => { A.$('#g-monthly').value = e.target.value; update(); });
-  const pick = e => {
-    const b = e.target.closest('[data-cagr]');
-    if (!b) return;
-    A.$('#g-cagr').value = b.dataset.cagr;
-    update();
-  };
-  A.$('.goal-presets').addEventListener('click', pick);
-  A.$('#g-out').addEventListener('click', pick);
-  const box = A.$('#g-chart');
-  drawGoalChart(start, goalSettings(start));
-  new ResizeObserver(() => drawGoalChart(start, read())).observe(box);
+}
+
+// Redraws a chart when its box resizes, and stops once the page has moved on and
+// the box is gone, so a later resize doesn't reach for controls that no longer exist.
+function watchSize(box, draw) {
+  const watcher = new ResizeObserver(() => (box.isConnected ? draw() : watcher.disconnect()));
+  watcher.observe(box);
 }
 
 // Reports and Analysis share one page, each with its own tabs.
@@ -2844,7 +2670,8 @@ function reportsView(r) {
   if (!analysis && ANALYSIS[r.tab]) return A.go(`${HOME}/analysis/${r.tab}`, true);
   const tabs = analysis ? ANALYSIS : REPORTS;
   const tab = tabs[r.tab] ? r.tab : analysis ? 'goals' : 'dividends';
-  const body = tab === 'goals' ? goalsReport() : tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : tab === 'timeline' ? timelineReport() : tab === 'performance' ? performanceReport() : tab === 'metrics' ? metricsReport() : tab === 'rating' ? ratingReport() : dividendReport();
+  const goals = tab === 'goals' ? goalsPage() : null;
+  const body = goals ? goals.page() : tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : tab === 'timeline' ? timelineReport() : tab === 'performance' ? performanceReport() : tab === 'metrics' ? metricsReport() : tab === 'rating' ? ratingReport() : dividendReport();
   A.view.innerHTML = `
     ${hero(analysis ? 'Analysis' : 'Reports', tabs[tab], HOME)}
     <div class="seg tabs" role="group" aria-label="${analysis ? 'Analysis' : 'Report'}">
@@ -2855,15 +2682,15 @@ function reportsView(r) {
   const bars = A.$('.months.long');
   if (bars) bars.scrollLeft = bars.scrollWidth;
   if (tab === 'metrics') refreshPeHistory();
-  if (tab === 'goals') bindGoals();
+  goals?.bind();
   const chart = A.$('#pf-growth');
   if (chart) {
     drawGrowth();
-    new ResizeObserver(drawGrowth).observe(chart);
+    watchSize(chart, drawGrowth);
   }
   A.view.querySelectorAll('.pf-chart').forEach(box => {
     drawChart(box);
-    new ResizeObserver(() => drawChart(box)).observe(box);
+    watchSize(box, () => drawChart(box));
   });
   const inPlace = change => {
     const top = A.$('.scroll').scrollTop;
@@ -2891,7 +2718,7 @@ function reportsView(r) {
     A.view.querySelectorAll('[data-range]').forEach(x => x.setAttribute('aria-pressed', x.dataset.range === b.dataset.range));
     A.view.querySelectorAll('.pf-chart').forEach(drawChart);
   }));
-  A.$('#r-broker').addEventListener('change', e => { R.broker = e.target.value; reportsView(r); });
+  A.$('#r-broker')?.addEventListener('change', e => { R.broker = e.target.value; reportsView(r); });
   A.$('#r-year')?.addEventListener('change', e => { R.year = e.target.value; reportsView(r); });
   A.$('#r-detail')?.addEventListener('change', e => { A.ls.set('pfReportDetail', e.target.checked); reportsView(r); });
   A.$('#r-perf')?.addEventListener('change', e => { A.ls.set('pfPerfGroup', e.target.value); reportsView(r); });

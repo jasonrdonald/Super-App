@@ -51,6 +51,23 @@ export function retiralsTileText() {
   return policies().length ? A.plural(policies().length, 'policy').replace('policys', 'policies') : '';
 }
 
+// Each account's value today, for Net worth. EPF counts its balance, not the
+// pension (EPS), which is paid as a pension. LIC counts only its minimum surrender
+// value, which is what's certain if it were surrendered today.
+export function retiralsParts() {
+  return [
+    ...epfAccounts().map(a => {
+      const s = summaryOf(a.id), last = lastContribution(a.id);
+      return s && { id: a.id, kind: 'EPF', name: a.name, value: s.balance, href: accountPath(a.id), monthly: last ? last.employee + last.employer : 0, rate: s.lastRate };
+    }),
+    ...npsAccounts().map(a => {
+      const s = npsOf(a);
+      return s && { id: a.id, kind: 'NPS', name: a.name, value: s.latest.value, href: accountPath(a.id), monthly: 0, rate: s.latest.xirr };
+    }),
+    ...policies().map(a => ({ id: a.id, kind: 'LIC', name: a.name, value: policyOf(a).surrenderFloor ?? 0, href: accountPath(a.id), monthly: 0, rate: null })),
+  ].filter(Boolean);
+}
+
 function hero(title, sub, up, extra = '') {
   const eye = isPrivate();
   return `<header class="topbar hero">

@@ -7,6 +7,9 @@ import { SECTIONS, NOTE_SECTIONS, DEFAULT_SECTION, sectionById, isNoteSection } 
 import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.js';
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
 import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote as cleanPortfolioNote } from './portfolio.js';
+import { initNetworth, networthView, networthAction, networthNav, networthTileText } from './networth-view.js';
+import { initLoans, loansView, loansAction, loansRouteValid, loansNav, loansTileText } from './loans-view.js';
+import { cleanLoan } from './loan.js';
 import { initRetirals, retiralsView, retiralsAction, retiralsRouteValid, retiralsNav, retiralsTileText } from './retirals-view.js';
 import { cleanRetiralAccount, cleanRetiralEntry, cleanRetiralStatement } from './epf.js';
 import { initPortfolio, portfolioView, portfolioAction, portfolioRouteValid, portfolioNav, portfolioTileText, portfolioChanged } from './portfolio-view.js';
@@ -45,6 +48,7 @@ const S = {
   retiralAccounts: [],
   retiralEntries: [],
   retiralStatements: [],
+  loans: [],
   priceMonths: [],
   market: [],
   open: new Set(ls.get('open', [])),
@@ -241,6 +245,7 @@ const snapshot = () => ({
   retiralAccounts: S.retiralAccounts,
   retiralEntries: S.retiralEntries,
   retiralStatements: S.retiralStatements,
+  loans: S.loans,
 });
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -340,7 +345,7 @@ async function importData(data) {
   await db.putMany('notes', noteChanged);
   for (const [store, clean] of [['paymentCategories', cleanCategory], ['paymentTypes', cleanType], ['payments', cleanPayment], ['paymentRecords', cleanRecord],
     ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote], ['earnContracts', cleanContract], ['transfers', cleanTransfer], ['brokerFees', cleanFee],
-    ['retiralAccounts', cleanRetiralAccount], ['retiralEntries', cleanRetiralEntry], ['retiralStatements', cleanRetiralStatement]]) {
+    ['retiralAccounts', cleanRetiralAccount], ['retiralEntries', cleanRetiralEntry], ['retiralStatements', cleanRetiralStatement], ['loans', cleanLoan]]) {
     const items = (Array.isArray(data[store]) ? data[store] : []).map(clean).filter(Boolean);
     await db.putMany(store, items.map(x => merge(S[store], x, true)).filter(Boolean));
   }
@@ -403,6 +408,8 @@ function parseRoute(hash) {
     const page = p[2] === 'lic' ? 'lic-new' : p[2] === 'a' && p[3] ? (p[4] === 'edit' ? 'lic-edit' : 'account') : 'home';
     return { name: 'retirals', section: p[1], page, id: p[3] };
   }
+  if (p[0] === 's' && p[1] === 'networth') return { name: 'networth', section: p[1], page: p[2] === 'milestones' ? 'milestones' : 'home', id: p[2] === 'milestones' ? 'milestones' : undefined };
+  if (p[0] === 's' && p[1] === 'loans') return { name: 'loans', section: p[1], page: p[2] === 'l' && p[3] ? 'loan' : 'home', id: p[3] };
   if (p[0] === 's' && p[1] === 'portfolio') {
     const base = { name: 'portfolio', section: p[1] };
     if (!p[2]) return { ...base, page: 'home' };
@@ -428,7 +435,7 @@ function parseRoute(hash) {
   return null;
 }
 
-const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id)) && (r.name !== 'payments' || payRouteValid(r)) && (r.name !== 'retirals' || retiralsRouteValid(r)) && (r.name !== 'portfolio' || portfolioRouteValid(r));
+const routeValid = r => !!r && (!r.section || !!sectionById(r.section)) && (!r.nb || !!nbById(r.nb)) && (r.name !== 'note' || !!noteById(r.id)) && (r.name !== 'payments' || payRouteValid(r)) && (r.name !== 'retirals' || retiralsRouteValid(r)) && (r.name !== 'loans' || loansRouteValid(r)) && (r.name !== 'portfolio' || portfolioRouteValid(r));
 
 function go(hash, replace = false) {
   if (replace) location.replace(hash);
@@ -499,6 +506,8 @@ function renderView() {
   else if (r.name === 'payments') paymentsView(r);
   else if (r.name === 'portfolio') portfolioView(r);
   else if (r.name === 'retirals') retiralsView(r);
+  else if (r.name === 'loans') loansView(r);
+  else if (r.name === 'networth') networthView(r);
   else if (r.name === 'settings') settingsView();
   else listView(r);
 }
@@ -563,7 +572,7 @@ function renderDrawer() {
   }
 
   const payPage = ['add', 'edit', 'p'].includes(r.page) ? 'manage' : r.page;
-  const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.id === 'retirals' ? retiralsNav() : sec?.app ? portfolioNav() : [];
+  const pages = sec?.id === 'payments' ? PAY_PAGES : sec?.id === 'retirals' ? retiralsNav() : sec?.id === 'loans' ? loansNav() : sec?.id === 'networth' ? networthNav() : sec?.app ? portfolioNav() : [];
   const current = sec?.id === 'payments' ? payPage : ['reports', 'analysis', 'transfers', 'consolidated', 'data', 'disclosure'].includes(r.page) ? r.page : r.id ?? 'home';
   const pageLink = p => row(current === p.id, `<a class="label" href="${p.href}">${icon(p.icon)}<span>${esc(p.name)}</span></a>`);
   // Open by default, so the stored key means closed. A closed group marks the page inside it.
@@ -613,6 +622,8 @@ function homeView() {
   const tileCount = s => {
     if (s.id === 'payments') return dues.length ? `${dues.length} to pay` : '';
     if (s.id === 'retirals') return S.retiralAccounts.length ? retiralsTileText() : '';
+    if (s.id === 'networth') return networthTileText();
+    if (s.id === 'loans') return S.loans.length ? loansTileText() : '';
     if (s.app) return S.brokerAccounts.length ? portfolioTileText() : '';
     const k = countIn(s.id);
     return k ? plural(k, 'note') : '';
@@ -1247,6 +1258,8 @@ view.addEventListener('click', async e => {
   if (b.dataset.act.startsWith('pay-')) return paymentAction(b);
   if (b.dataset.act.startsWith('pf-')) return portfolioAction(b);
   if (b.dataset.act.startsWith('ret-')) return retiralsAction(b);
+  if (b.dataset.act.startsWith('loan-')) return loansAction(b);
+  if (b.dataset.act.startsWith('nw-')) return networthAction(b);
   switch (b.dataset.act) {
     case 'drawer': return openDrawer();
     case 'back': return goBack();
@@ -1334,8 +1347,10 @@ async function init() {
   initPayments(helpers);
   initPortfolio(helpers);
   initRetirals(helpers);
+  initLoans(helpers);
+  initNetworth(helpers);
   try {
-    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'retiralAccounts', 'retiralEntries', 'retiralStatements', 'market', 'priceMonths'];
+    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'retiralAccounts', 'retiralEntries', 'retiralStatements', 'loans', 'market', 'priceMonths'];
     (await Promise.all(stores.map(db.all))).forEach((rows, i) => { S[stores[i]] = rows; });
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;

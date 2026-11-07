@@ -16,8 +16,10 @@ export const SECTIONS = [
     presets: ['Insurances', 'Service & Repairs', 'Accessories'] },
   { id: 'finance', name: 'Finance', icon: 'chart', light: '#1f7a3d', dark: '#6fd08f',
     presets: ['Budget', 'Expense', 'Debt', 'Portfolio', 'Insurance', 'Goals', 'Tax', 'Estate Planning'] },
+  { id: 'networth', name: 'Net worth', icon: 'columns', light: '#3730a3', dark: '#a5b4fc', app: true, presets: [] },
   { id: 'portfolio', name: 'Portfolio', icon: 'pie', light: '#7a6200', dark: '#e3c95a', app: true, presets: [] },
   { id: 'retirals', name: 'Retirals', icon: 'shield', light: '#b4400b', dark: '#fb9a5b', app: true, presets: [] },
+  { id: 'loans', name: 'Loans', icon: 'home', light: '#a21caf', dark: '#ec8ef5', app: true, presets: [] },
   { id: 'work', name: 'Work', icon: 'briefcase', light: '#1d5fd1', dark: '#8fb3f7',
     presets: ['Goals', 'Meeting', 'Learning', 'Challenges'] },
 ];
