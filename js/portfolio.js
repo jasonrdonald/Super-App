@@ -338,7 +338,14 @@ export function buildPositions({ trades, holdings = [], market = [], own = [], f
   return replay(named, [...issues, ...actions], dividends, fractional);
 }
 
-// One line of the holdings table, with `quote` as { price, change, changePct }.
+// The periods a change in value is shown over. 1D is the day's change; the rest come
+// from each quote's percentage change over the period.
+export const CHANGE_PERIODS = ['1d', '5d', '1m', '6m', 'ytd', '1y'];
+
+// A stock quote saved before period changes were kept still has its own returns.
+const storedPerf = f => f && { '5d': f.perf1w, '1m': f.perf1m, '6m': f.perf6m, ytd: f.perfYtd, '1y': f.perf1y };
+
+// One line of the holdings table, with `quote` as { price, change, changePct, perf }.
 export function summarizePosition(p, quote) {
   const qty = qtyOf(p.lots);
   const cost = costOf(p.lots);
@@ -352,7 +359,15 @@ export function summarizePosition(p, quote) {
   const yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
   const dividends12m = p.dividendEvents.filter(d => d.date >= yearAgo).reduce((n, d) => n + d.amount, 0);
   const flows = cashFlows(p, value);
+  // What today's holding gained over each period, as if held throughout it.
+  const changes = Object.fromEntries(CHANGE_PERIODS.map(k => {
+    if (k === '1d') return [k, dayGain];
+    const start = quote?.starts?.[k];
+    const pct = start > 0 && price ? (price / start - 1) * 100 : (quote?.perf ?? storedPerf(quote?.f))?.[k];
+    return [k, value == null || !Number.isFinite(pct) || pct <= -100 ? null : value - value / (1 + pct / 100)];
+  }));
   return {
+    changes,
     flows, xirr: xirr(flows),
     dividends12m, yieldOnCost: cost > 0 ? dividends12m / cost * 100 : null,
     symbol: p.symbol, qty, avg: qty > EPS ? cost / qty : 0, price, cost, value,
@@ -387,6 +402,14 @@ export function summarizeAll(rows) {
     dayGain, dayPct: prevValue ? dayGain / prevValue * 100 : 0,
     dividends: sum('dividends'), realized: sum('realized'),
     unpriced: rows.filter(r => r.qty > EPS && r.value == null).length,
+    // Each period's change on the holdings that have one, its share of their value then,
+    // and how many priced holdings go without.
+    changes: Object.fromEntries(CHANGE_PERIODS.map(k => {
+      const known = priced.filter(r => r.qty > EPS && r.changes?.[k] != null);
+      const amount = known.reduce((n, r) => n + r.changes[k], 0);
+      const before = known.reduce((n, r) => n + r.value, 0) - amount;
+      return [k, { amount: known.length ? amount : null, pct: known.length && before ? amount / before * 100 : null, missing: priced.filter(r => r.qty > EPS).length - known.length }];
+    })),
   };
 }
 
@@ -494,6 +517,16 @@ export function cleanMarket(x) {
   }
   if (Number.isFinite(x.schemeCode)) out.schemeCode = x.schemeCode;
   if (Number.isFinite(x.eventsAt)) out.eventsAt = x.eventsAt;
+  if (x.starts && typeof x.starts === 'object') {
+    const starts = Object.fromEntries(CHANGE_PERIODS.filter(k => Number.isFinite(x.starts[k]) && x.starts[k] > 0).map(k => [k, x.starts[k]]));
+    if (Object.keys(starts).length) out.starts = starts;
+  }
+  if (Number.isFinite(x.longAt)) out.longAt = x.longAt;
+  if (typeof x.coinId === 'string') out.coinId = text(x.coinId, 80);
+  if (x.perf && typeof x.perf === 'object') {
+    const perf = Object.fromEntries(CHANGE_PERIODS.filter(k => Number.isFinite(x.perf[k])).map(k => [k, x.perf[k]]));
+    if (Object.keys(perf).length) out.perf = perf;
+  }
   if (Number.isFinite(x.price)) Object.assign(out, { price: x.price, change: Number.isFinite(x.change) ? x.change : null, changePct: Number.isFinite(x.changePct) ? x.changePct : null, quotedAt: finite(x.quotedAt) });
   return out;
 }

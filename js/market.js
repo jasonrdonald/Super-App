@@ -9,6 +9,34 @@ let offline = false;
 export const setOffline = on => { offline = on; };
 const web = (...args) => (offline ? Promise.reject(new Error('Public data is set to local backup')) : fetch(...args));
 
+/* ---------- change over a period ---------- */
+
+// The periods a price change is shown over, besides the day. 5D is the past week,
+// five trading days.
+export const PERIODS = ['5d', '1m', '6m', 'ytd', '1y'];
+
+// The percentage change over each period from TradingView's own columns.
+const perfFrom = f => Object.fromEntries([['5d', f.perf1w], ['1m', f.perf1m], ['6m', f.perf6m], ['ytd', f.perfYtd], ['1y', f.perf1y]].filter(([, v]) => Number.isFinite(v)));
+
+// The price each period started at, from a daily series of [isoDate, price]: the last
+// price on or before the period's start. Kept as prices, not percentages, so the
+// change stays right as today's price moves.
+export function seriesStarts(points, today = new Date()) {
+  const iso = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const back = (days = 0, months = 0, years = 0) => iso(new Date(today.getFullYear() - years, today.getMonth() - months, today.getDate() - days));
+  const starts = { '5d': back(7), '1m': back(0, 1), '6m': back(0, 6), ytd: `${today.getFullYear() - 1}-12-31`, '1y': back(0, 0, 1) };
+  const sorted = [...points].sort((a, b) => a[0].localeCompare(b[0]));
+  const out = {};
+  for (const [k, start] of Object.entries(starts)) {
+    // The free crypto service gives a year at most, so its first price may land a day or two after a year ago.
+    const grace = iso(new Date(new Date(`${start}T00:00:00`).getTime() + 3 * 864e5));
+    if (!sorted.length || sorted[0][0] > grace) continue;
+    const then = (sorted.filter(p => p[0] <= start).at(-1) ?? sorted[0])[1];
+    if (then > 0) out[k] = then;
+  }
+  return out;
+}
+
 /* ---------- stock prices: TradingView's public scanner, delayed 15 minutes ---------- */
 
 const tvTicker = (exchange, s) => `${exchange}:${s.replace(/-/g, '_')}`;
@@ -27,7 +55,7 @@ const FUNDAMENTALS = {
   payout: ['dividend_payout_ratio_ttm'], beta: ['beta_1_year'],
   revenueGrowth: ['total_revenue_yoy_growth_ttm'], epsGrowth: ['earnings_per_share_diluted_yoy_growth_ttm'], profitGrowth: ['net_income_yoy_growth_ttm'],
   high52: ['price_52_week_high'], low52: ['price_52_week_low'],
-  perf1w: ['Perf.W'], perf1m: ['Perf.1M'], perf3m: ['Perf.3M'], perf6m: ['Perf.6M'], perf1y: ['Perf.Y'], perf5y: ['Perf.5Y'], rsi: ['RSI'], sma200: ['SMA200'],
+  perf1w: ['Perf.W'], perf1m: ['Perf.1M'], perf3m: ['Perf.3M'], perf6m: ['Perf.6M'], perf1y: ['Perf.Y'], perfYtd: ['Perf.YTD'], perf5y: ['Perf.5Y'], rsi: ['RSI'], sma200: ['SMA200'],
   allHigh: ['High.All'], allLow: ['Low.All'],
 };
 const PRICE_COLUMNS = ['close', 'change', 'change_abs', 'description'];
@@ -82,7 +110,7 @@ export async function stockQuotes(symbols) {
   const fill = (list, exchange, rows) => {
     const bySymbol = new Map(list.map(s => [tvTicker(exchange, s), s]));
     for (const { s, d } of rows) {
-      if (d[0] != null) quotes.set(bySymbol.get(s), { price: d[0], changePct: d[1], change: d[2], name: d[3], f: fundamentalsFrom(d), epsYears: yearlyEps(d) });
+      if (d[0] != null) { const f = fundamentalsFrom(d); quotes.set(bySymbol.get(s), { price: d[0], changePct: d[1], change: d[2], name: d[3], f, perf: perfFrom(f), epsYears: yearlyEps(d) }); }
     }
   };
   for (let i = 0; i < symbols.length; i += 300) {
@@ -103,7 +131,7 @@ export async function usQuotes(symbols) {
   if (!res.ok) throw new Error(`Price service answered ${res.status}`);
   const quotes = new Map();
   for (const { s, d } of (await res.json()).data ?? []) {
-    if (d[0] != null) quotes.set(s.split(':')[1], { price: d[0], changePct: d[1], change: d[2], name: d[3], f: fundamentalsFrom(d) });
+    if (d[0] != null) { const f = fundamentalsFrom(d); quotes.set(s.split(':')[1], { price: d[0], changePct: d[1], change: d[2], name: d[3], f, perf: perfFrom(f) }); }
   }
   return quotes;
 }
@@ -293,7 +321,9 @@ export async function fundNav(code) {
   if (!latest) return null;
   const price = Number(latest.nav);
   const change = previous ? price - Number(previous.nav) : null;
-  return { price, change, changePct: change == null ? null : change / Number(previous.nav) * 100 };
+  // Dates come as dd-mm-yyyy.
+  const points = (nav.data ?? []).map(x => [x.date.split('-').reverse().join('-'), Number(x.nav)]);
+  return { price, change, changePct: change == null ? null : change / Number(previous.nav) * 100, starts: seriesStarts(points), startsAt: Date.now() };
 }
 
 // The first and last NAV of each month, from the daily list, which runs newest first.
@@ -333,11 +363,29 @@ export async function cryptoQuotes(symbols, currency = 'inr') {
     if (coin) ids.set(coin.id, symbol);
   }
   if (!ids.size) return quotes;
-  const res = await web(`https://api.coingecko.com/api/v3/simple/price?ids=${[...ids.keys()].join(',')}&vs_currencies=${currency}&include_24hr_change=true`, { signal: timed() });
-  for (const [id, q] of Object.entries(await res.json())) {
-    const price = q[currency], changePct = q[`${currency}_24h_change`] ?? null;
-    const symbol = ids.get(id);
-    quotes.set(symbol, { price, changePct, change: changePct == null ? null : price - price / (1 + changePct / 100), name: COINS[symbol.toUpperCase()]?.[1] ?? symbol });
+  // One call for every coin: today's price with its change over a day, week, month and year.
+  const res = await web(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=${currency}&ids=${[...ids.keys()].join(',')}&price_change_percentage=24h,7d,30d,1y&per_page=250`, { signal: timed() });
+  if (!res.ok) throw new Error(`Crypto service answered ${res.status}`);
+  const startFrom = (price, pct) => (Number.isFinite(pct) && pct > -100 ? price / (1 + pct / 100) : null);
+  for (const q of await res.json()) {
+    const symbol = ids.get(q.id);
+    const price = q.current_price, changePct = q.price_change_percentage_24h_in_currency ?? q.price_change_percentage_24h ?? null;
+    if (!symbol || price == null) continue;
+    const starts = Object.fromEntries([['5d', q.price_change_percentage_7d_in_currency], ['1m', q.price_change_percentage_30d_in_currency], ['1y', q.price_change_percentage_1y_in_currency]]
+      .map(([k, pct]) => [k, startFrom(price, pct)]).filter(([, v]) => v != null));
+    quotes.set(symbol, { price, changePct, change: changePct == null ? null : price - price / (1 + changePct / 100), name: COINS[symbol.toUpperCase()]?.[1] ?? symbol, coinId: q.id, starts });
   }
   return quotes;
+}
+
+// The 6M and YTD start prices for one coin, from a year of daily prices. The free
+// service limits how often it answers, so callers ask a few coins at a time and
+// resolve to null when it says no.
+export async function cryptoStarts(id, currency = 'inr') {
+  const res = await web(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=${currency}&days=365`, { signal: timed() }).catch(() => null);
+  if (!res?.ok) return null;
+  const chart = await res.json();
+  if (!chart?.prices?.length) return null;
+  const all = seriesStarts(chart.prices.map(([ms, v]) => [new Date(ms).toISOString().slice(0, 10), v]));
+  return Object.fromEntries(['6m', 'ytd'].filter(k => all[k]).map(k => [k, all[k]]));
 }

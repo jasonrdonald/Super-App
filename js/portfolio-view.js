@@ -2,9 +2,9 @@ import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
 import { shortAmounts, shortMoney } from './format.js';
-import { ISSUE_LABEL, xirr, costHeldAt, baseSymbol, allActions, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
+import { CHANGE_PERIODS, ISSUE_LABEL, xirr, costHeldAt, baseSymbol, allActions, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
-import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, listedSecurities, setOffline, EVENT_GAP_MS } from './market.js';
+import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, cryptoStarts, listedSecurities, setOffline, EVENT_GAP_MS } from './market.js';
 import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, unzipFiles } from './public-data.js';
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { createMilestones } from './milestones.js';
@@ -303,6 +303,7 @@ function inRupees(line, rate) {
   const out = { ...line };
   for (const key of MONEY_FIELDS) if (out[key] != null) out[key] *= rate;
   out.flows = (line.flows ?? []).map(f => ({ ...f, amount: f.amount * rate }));
+  if (line.changes) out.changes = Object.fromEntries(Object.entries(line.changes).map(([k, v]) => [k, v == null ? null : v * rate]));
   return out;
 }
 
@@ -444,7 +445,24 @@ async function refreshQuotes() {
     const rate = await usdInr();
     if (rate) apply(FX_KEY, { price: rate });
   }
-  if (coins.size) (await cryptoQuotes([...coins])).forEach((q, s) => apply(CRYPTO_PREFIX + s, q));
+  if (coins.size) {
+    // The week, month and year come with the price. The 6M and YTD starts need a call per
+    // coin, which the free service limits, so they're kept a day and filled a few at a time.
+    const kept = s => A.S.market.find(m => m.symbol === CRYPTO_PREFIX + s);
+    const quotes = await cryptoQuotes([...coins]);
+    quotes.forEach((q, s) => {
+      const old = kept(s);
+      const long = old?.longAt > t - 864e5 ? { '6m': old.starts?.['6m'], ytd: old.starts?.ytd } : {};
+      apply(CRYPTO_PREFIX + s, { ...q, starts: { ...q.starts, ...Object.fromEntries(Object.entries(long).filter(([, v]) => v)) }, longAt: old?.longAt });
+    });
+    for (const [s, q] of quotes) {
+      if (!q.coinId || kept(s)?.longAt > t - 864e5) continue;
+      const long = await cryptoStarts(q.coinId);
+      if (!long) break;
+      saveMarket(CRYPTO_PREFIX + s, { starts: { ...kept(s).starts, ...long }, longAt: t });
+      await new Promise(done => setTimeout(done, 1500));
+    }
+  }
   const fileRow = name => A.S.brokerHoldings.flatMap(h => h.rows).find(x => baseSymbol(x.symbol) === name);
   for (const name of funds.keys()) {
     const isin = fileRow(name)?.isin || A.S.trades.find(t => t.symbol === name)?.isin;
@@ -700,13 +718,38 @@ function stat(label, value, note = '', cls = '') {
   return `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value ${cls}">${value}</span><span class="stat-note ${cls}">${note}</span></div>`;
 }
 
+// The change in value over a chosen period: the day's, or how much today's holdings
+// moved over the past week, month, six months, this year or a year.
+const PERIOD_LABELS = { '1d': '1D', '5d': '5D', '1m': '1M', '6m': '6M', ytd: 'YTD', '1y': '1Y' };
+const PERIOD_NAMES = { '1d': 'today', '5d': 'over the past week', '1m': 'over the past month', '6m': 'over the past 6 months', ytd: 'this year', '1y': 'over the past year' };
+const changePeriod = () => {
+  const k = A.ls.get('pfChangePeriod', '1d');
+  return CHANGE_PERIODS.includes(k) ? k : '1d';
+};
+const changeOf = (s, k = changePeriod()) => s.changes?.[k] ?? { amount: k === '1d' ? s.dayGain : null, pct: k === '1d' ? s.dayPct : null, missing: 0 };
+
+function changeStat(s) {
+  const k = changePeriod();
+  const c = changeOf(s, k);
+  const left = c.missing ? `, leaving out ${A.plural(c.missing, 'holding')} not yet priced over this period` : '';
+  const note = c.amount == null ? 'Refresh prices to see it' : `${pct(c.pct)} ${PERIOD_NAMES[k]}${left}`;
+  return `<div class="stat pf-change"><span class="stat-label">Change${info('change')}</span><span class="stat-value ${tone(c.amount)}">${money(c.amount, true)}</span><span class="stat-note ${tone(c.amount)}">${note}</span>
+    <span class="seg pf-periods" role="group" aria-label="Change over">${CHANGE_PERIODS.map(p => `<button data-act="pf-period" data-id="${p}" aria-pressed="${p === k}">${PERIOD_LABELS[p]}</button>`).join('')}</span></div>`;
+}
+
+// A broker card's change for the chosen period, under its gain.
+function cardChange(s) {
+  const c = changeOf(s);
+  return c.amount == null ? '' : `<span class="pf-delta pf-period-delta ${tone(c.amount)}">${PERIOD_LABELS[changePeriod()]} ${money(c.amount, true)} (${pct(c.pct)})</span>`;
+}
+
 function summaryStats(s) {
   return `<div class="stats five">
     ${stat(`Total amount${info('price')}`, money(s.value), `Invested ${money(s.cost)}${s.unpriced ? `, ${s.unpriced} unpriced left out` : ''}`)}
     ${stat(`Unrealized gain/loss${info('gain')}`, money(s.gain, true), pct(s.gainPct), tone(s.gain))}
     ${stat(`XIRR${info('xirr')}`, pct(s.xirr), 'Annual return', tone(s.xirr))}
     ${stat('Realized gain/loss', money(s.realized, true), pct(s.realizedPct), tone(s.realized))}
-    ${stat(`Day change${info('price')}`, money(s.dayGain, true), pct(s.dayPct), tone(s.dayGain))}
+    ${changeStat(s)}
     ${stat(`Total dividends${info('dividends')}`, money(s.dividends), s.yieldOnCost ? `${s.yieldOnCost.toFixed(2)}% yield on cost${info('yieldOnCost')}` : '')}
   </div>`;
 }
@@ -850,7 +893,7 @@ function homeView(r) {
           const card = `<a class="sub pf-account" href="${accountPath(a.id)}">
             <span class="sub-main"><span class="sub-text"><span class="card-title">${A.esc(a.name)}</span>
             <span class="card-meta">${A.esc(a.broker)} · ${KINDS[a.kind]} · ${A.plural(held.length, 'holding')}${rupees ? ` · ${rupees}` : ''}</span></span></span>
-            <span class="pay-side"><span class="pay-amount">${money(s.value)}</span><span class="pf-delta ${tone(s.gain)}">${money(s.gain, true)} (${pct(s.gainPct)})</span></span>
+            <span class="pay-side"><span class="pay-amount">${money(s.value)}</span><span class="pf-delta ${tone(s.gain)}">${money(s.gain, true)} (${pct(s.gainPct)})</span>${cardChange(s)}</span>
           </a>`;
           shown = CONFIG.currency;
           return card;
@@ -3266,6 +3309,13 @@ export async function portfolioAction(b) {
     case 'pf-public-backup': return backupPublic();
     case 'pf-backup': return saveBackup();
     case 'pf-info': return showSource(id);
+    case 'pf-period': {
+      A.ls.set('pfChangePeriod', id);
+      const top = A.$('.scroll')?.scrollTop ?? 0;
+      A.refresh();
+      if (A.$('.scroll')) A.$('.scroll').scrollTop = top;
+      return undefined;
+    }
     case 'pf-privacy':
       A.ls.set('pfPrivate', !isPrivate());
       return A.refresh();
