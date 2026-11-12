@@ -1011,6 +1011,7 @@ th.num .pf-th { justify-content: flex-end; }
 :root[data-theme="dark"] .nw-lic { background: #9085e9; }
 
 /* Change over a period, on Portfolio's summaries */
-.pf-change .pf-periods { display: flex; flex-wrap: wrap; gap: 2px; margin: 8px 0 0; padding: 2px; align-self: flex-start; }
-.pf-change .pf-periods button { padding: 3px 7px; font-size: .74rem; }
+.pf-period-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: -4px 0 12px; }
+.pf-period-row .pf-periods { margin: 0; }
+.pf-period-row .pf-periods button { padding: 5px 12px; font-size: .84rem; }
 .pf-period-delta { font-size: .78rem; }

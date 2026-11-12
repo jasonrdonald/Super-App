@@ -8,6 +8,7 @@ import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuati
 import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, unzipFiles } from './public-data.js';
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { createMilestones } from './milestones.js';
+import { reportHtml, printReport } from './portfolio-report.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS, BACKUP_FILES, BACKUP_CONTENTS, BACKUP_LEAVES_OUT, BACKUP_NEEDS_NOTHING } from './disclosures.js';
 import { GROUPINGS, bandOf, orderBands, RATING_SCALES, momentumRating, growthRating, valuationRating, profitabilityRating, verdictRating } from './ratings.js';
@@ -733,9 +734,15 @@ function changeStat(s) {
   const c = changeOf(s, k);
   const left = c.missing ? `, leaving out ${A.plural(c.missing, 'holding')} not yet priced over this period` : '';
   const note = c.amount == null ? 'Refresh prices to see it' : `${pct(c.pct)} ${PERIOD_NAMES[k]}${left}`;
-  return `<div class="stat pf-change"><span class="stat-label">Change${info('change')}</span><span class="stat-value ${tone(c.amount)}">${money(c.amount, true)}</span><span class="stat-note ${tone(c.amount)}">${note}</span>
-    <span class="seg pf-periods" role="group" aria-label="Change over">${CHANGE_PERIODS.map(p => `<button data-act="pf-period" data-id="${p}" aria-pressed="${p === k}">${PERIOD_LABELS[p]}</button>`).join('')}</span></div>`;
+  return stat(`Change · ${PERIOD_LABELS[k]}${info('change')}`, money(c.amount, true), note, tone(c.amount));
 }
+
+// The period switch, under the summary cards; it sets the Change card and every broker card.
+const periodSwitch = () => {
+  const k = changePeriod();
+  return `<div class="pf-period-row"><span class="muted small">Change over</span>
+    <div class="seg pf-periods" role="group" aria-label="Change over">${CHANGE_PERIODS.map(p => `<button data-act="pf-period" data-id="${p}" aria-pressed="${p === k}">${PERIOD_LABELS[p]}</button>`).join('')}</div></div>`;
+};
 
 // A broker card's change for the chosen period, under its gain.
 function cardChange(s) {
@@ -751,7 +758,92 @@ function summaryStats(s) {
     ${stat('Realized gain/loss', money(s.realized, true), pct(s.realizedPct), tone(s.realized))}
     ${changeStat(s)}
     ${stat(`Total dividends${info('dividends')}`, money(s.dividends), s.yieldOnCost ? `${s.yieldOnCost.toFixed(2)}% yield on cost${info('yieldOnCost')}` : '')}
-  </div>`;
+  </div>
+  ${periodSwitch()}`;
+}
+
+/* ---------- PDF export ---------- */
+
+// Asset types in a fixed order. US brokers' shares and ETFs are their own types.
+const TYPE_ORDER = ['Stocks', 'ETFs', 'US stocks', 'US ETFs', 'Mutual funds', 'Debt', 'Commodities', 'Crypto'];
+const typeLabel = (group, usd) => (usd && (group === 'Stocks' || group === 'ETFs') ? `US ${group === 'Stocks' ? 'stocks' : 'ETFs'}` : group);
+const byType = (lines, label) => {
+  const map = new Map();
+  for (const l of lines) map.set(label(l), [...(map.get(label(l)) ?? []), l]);
+  return [...map].sort((a, b) => (TYPE_ORDER.indexOf(a[0]) + 1 || 99) - (TYPE_ORDER.indexOf(b[0]) + 1 || 99));
+};
+const typeSummary = lines => ({ ...summarizeAll(lines), count: lines.length });
+
+// The figures behind a report on some brokers: totals in rupees, asset types across
+// them, and each broker's asset types and holdings in its own currency.
+function reportData(list) {
+  const rate = fxRate();
+  const rupeeLines = (a, lines) => (isUsd(a) ? (rate ? lines.map(l => inRupees(l, rate)) : []) : lines);
+  const brokers = list.map(a => {
+    const c = computed(a), usd = isUsd(a);
+    const held = c.lines.filter(l => l.qty > EPS && l.value != null);
+    const own = typeSummary(held);
+    const rupees = typeSummary(rupeeLines(a, held));
+    return {
+      name: a.name, broker: a.broker, kind: KINDS[a.kind], currency: a.currency ?? CONFIG.currency, usd,
+      rupees: usd && rate ? rupees.value : null, rupeeSummary: rupees, missing: usd && !rate,
+      summary: { ...own, realized: c.summary.realized, dividends: c.summary.dividends, xirrAll: c.summary.xirr },
+      types: byType(held, l => l.group).map(([label, lines]) => {
+        const s = typeSummary(lines);
+        return {
+          label, summary: s, share: own.value ? s.value / own.value * 100 : null,
+          holdings: [...lines].sort((p, q) => q.value - p.value).map(l => ({
+            symbol: l.symbol, name: l.name, qty: l.qty, avg: l.avg, price: l.price, cost: l.cost, value: l.value,
+            gain: l.gain, gainPct: l.gainPct, xirr: l.xirr, weight: own.value ? l.value / own.value * 100 : null,
+          })),
+        };
+      }),
+      heldCount: held.length,
+    };
+  });
+  const allHeld = list.flatMap(a => rupeeLines(a, computed(a).lines.filter(l => l.qty > EPS && l.value != null)).map(l => ({ ...l, type: typeLabel(l.group, isUsd(a)) })));
+  const typesTotal = typeSummary(allHeld);
+  const total = summarizeAll(list.flatMap(a => rupeeLines(a, computed(a).lines)));
+  brokers.forEach(b => { b.share = typesTotal.value ? b.rupeeSummary.value / typesTotal.value * 100 : null; });
+  const k = changePeriod();
+  const change = changeOf(total, k);
+  const at = A.ls.get('pfQuotedAt', 0);
+  const stamp = new Date();
+  const iso = new Date(stamp.getTime() - stamp.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const one = list.length === 1 ? list[0] : null;
+  const missing = brokers.filter(b => b.missing).map(b => b.name);
+  return {
+    locale: CONFIG.locale, currency: CONFIG.currency, total, typesTotal, brokers,
+    title: one ? one.name : 'Portfolio', subtitle: one ? [one.broker !== one.name && one.broker, KINDS[one.kind], isUsd(one) && 'in US dollars'].filter(Boolean).join(' · ') : `${A.plural(list.length, 'broker account')}, in rupees`,
+    fileName: `SuperApp ${one ? one.name : 'portfolio'} ${iso}`,
+    generated: `Made ${A.fmt(stamp, { dateStyle: 'medium', timeStyle: 'short' })}`,
+    pricesAt: at ? `Prices as of ${A.fmt(new Date(at), { dateStyle: 'medium', timeStyle: 'short' })}, delayed` : 'Prices not loaded',
+    holdings: allHeld.length,
+    change: { label: PERIOD_LABELS[k], amount: change.amount, pct: change.pct, name: PERIOD_NAMES[k] },
+    fx: rate && list.some(isUsd) ? `US$1 = ${formatters[CONFIG.currency].format(rate)}` : 'All in rupees',
+    types: byType(allHeld, l => l.type).map(([label, lines]) => {
+      const s = typeSummary(lines);
+      return { label, summary: s, share: typesTotal.value ? s.value / typesTotal.value * 100 : null };
+    }),
+    notes: [
+      'Market values use delayed prices from TradingView, MFapi.in and CoinGecko, or the broker\'s holdings file where there\'s none.',
+      'Unrealized gain, invested and XIRR in the tables cover what\'s held today; the broker lines below each table add realized gains, dividends and XIRR on everything, sold included.',
+      list.some(isUsd) ? 'US brokers are shown in dollars in their own sections and in rupees in the totals.' : '',
+      missing.length ? `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} left out of the rupee totals, as there's no dollar rate yet.` : '',
+      'Made by SuperApp on this device. Not investment advice.',
+    ].filter(Boolean),
+  };
+}
+
+async function exportPdf(id) {
+  const list = id ? [accountById(id)] : accounts();
+  const pick = await A.choose(`Export ${id ? list[0].name : 'portfolio'} as PDF`, [
+    { icon: 'file', label: 'Summary: totals and asset types by broker' },
+    { icon: 'list', label: 'Detailed: also every holding in each broker' },
+  ]);
+  if (pick !== 0 && pick !== 1) return;
+  printReport(reportHtml(reportData(list), { detailed: pick === 1 }));
+  A.toast('Choose Save as PDF in the print window');
 }
 
 /* ---------- backup ---------- */
@@ -879,7 +971,7 @@ const fxNote = list => (list.some(isUsd) ? `<div class="status">${fxRate() ? `US
 
 function homeView(r) {
   const list = accounts();
-  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/consolidated">${icon('list')}<span>Consolidated</span></a><a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a><a class="btn sm" href="${HOME}/transfers">${icon('swap')}<span>Transfers</span></a>` : ''}`;
+  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/consolidated">${icon('list')}<span>Consolidated</span></a><a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a><a class="btn sm" href="${HOME}/transfers">${icon('swap')}<span>Transfers</span></a><button class="btn sm" data-act="pf-export">${icon('download')}<span>Export PDF</span></button>` : ''}`;
   const body = list.length
     ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
@@ -1220,6 +1312,7 @@ function accountView(r) {
   const c = computed(account);
   const tools = `${reconChip(account, c)}
         <button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>
+        <button class="btn sm" data-act="pf-export" data-id="${account.id}">${icon('download')}<span>Export PDF</span></button>
         <label class="btn sm">${icon('upload')}<span>Load files</span><input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden></label>`;
   A.view.innerHTML = `
     ${hero(account.name, `${account.broker} · ${KINDS[account.kind]}${account.clientId ? ` · ${account.clientId}` : ''}`, HOME,
@@ -3309,6 +3402,7 @@ export async function portfolioAction(b) {
     case 'pf-public-backup': return backupPublic();
     case 'pf-backup': return saveBackup();
     case 'pf-info': return showSource(id);
+    case 'pf-export': return exportPdf(id);
     case 'pf-period': {
       A.ls.set('pfChangePeriod', id);
       const top = A.$('.scroll')?.scrollTop ?? 0;
