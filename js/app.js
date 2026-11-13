@@ -8,6 +8,7 @@ import { cleanPayment, cleanRecord, cleanCategory, cleanType } from './payments.
 import { PAY_PAGES, initPayments, paymentsView, paymentAction, payRouteValid, attentionNow } from './payments-view.js';
 import { cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote as cleanPortfolioNote } from './portfolio.js';
 import { initNetworth, networthView, networthAction, networthNav, networthTileText } from './networth-view.js';
+import { initImportLog, cleanImportLog, logImport } from './import-log.js';
 import { initLoans, loansView, loansAction, loansRouteValid, loansNav, loansTileText } from './loans-view.js';
 import { cleanLoan } from './loan.js';
 import { initRetirals, retiralsView, retiralsAction, retiralsRouteValid, retiralsNav, retiralsTileText } from './retirals-view.js';
@@ -49,6 +50,7 @@ const S = {
   retiralEntries: [],
   retiralStatements: [],
   loans: [],
+  importLog: [],
   priceMonths: [],
   market: [],
   open: new Set(ls.get('open', [])),
@@ -246,6 +248,7 @@ const snapshot = () => ({
   retiralEntries: S.retiralEntries,
   retiralStatements: S.retiralStatements,
   loans: S.loans,
+  importLog: S.importLog,
 });
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -307,14 +310,23 @@ async function chooseImport(source) {
   return ok ? 'replace' : false;
 }
 
-async function runImport(data, how) {
+async function runImport(data, how, from = 'Backup file') {
   if (!isBackup(data)) throw new Error('This file is not a SuperApp backup.');
   if (how === 'replace') {
     const copy = backupFile();
     downloadFile(new File([copy], copy.name.replace('.json', '-before-replace.json'), { type: copy.type }));
     await clearBackedUp();
   }
-  return importData(data);
+  const result = await importData(data);
+  const held = BACKED_UP.reduce((n, k) => n + (Array.isArray(data[k]) ? data[k].length : 0), 0);
+  const stamp = Date.parse(data.exportedAt);
+  await logImport({
+    category: 'backup', source: from, what: how === 'replace' ? 'Replaced everything with a backup' : 'Merged a backup',
+    points: how === 'replace' ? held : result.added + result.updated,
+    detail: `${how === 'replace' ? 'Everything loaded' : `${result.added} new, ${result.updated} updated`} of ${held} items in the backup${Number.isFinite(stamp) ? `, made ${fmt(new Date(stamp), { dateStyle: 'medium', timeStyle: 'short' })}` : ''}`,
+    dataTo: Number.isFinite(stamp) ? new Date(stamp - new Date(stamp).getTimezoneOffset() * 60000).toISOString().slice(0, 10) : '',
+  });
+  return result;
 }
 
 async function importData(data) {
@@ -345,7 +357,7 @@ async function importData(data) {
   await db.putMany('notes', noteChanged);
   for (const [store, clean] of [['paymentCategories', cleanCategory], ['paymentTypes', cleanType], ['payments', cleanPayment], ['paymentRecords', cleanRecord],
     ['brokerAccounts', cleanAccount], ['trades', cleanTrade], ['brokerHoldings', cleanHoldingsFile], ['portfolioActions', cleanAdjustment], ['portfolioNotes', cleanPortfolioNote], ['earnContracts', cleanContract], ['transfers', cleanTransfer], ['brokerFees', cleanFee],
-    ['retiralAccounts', cleanRetiralAccount], ['retiralEntries', cleanRetiralEntry], ['retiralStatements', cleanRetiralStatement], ['loans', cleanLoan]]) {
+    ['retiralAccounts', cleanRetiralAccount], ['retiralEntries', cleanRetiralEntry], ['retiralStatements', cleanRetiralStatement], ['loans', cleanLoan], ['importLog', cleanImportLog]]) {
     const items = (Array.isArray(data[store]) ? data[store] : []).map(clean).filter(Boolean);
     await db.putMany(store, items.map(x => merge(S[store], x, true)).filter(Boolean));
   }
@@ -417,7 +429,7 @@ function parseRoute(hash) {
     if (p[2] === 'reports' || p[2] === 'analysis') return { ...base, page: p[2], tab: p[3] };
     if (p[2] === 'transfers') return { ...base, page: 'transfers' };
     if (p[2] === 'consolidated') return { ...base, page: 'consolidated' };
-    if (p[2] === 'data' || p[2] === 'disclosure') return { ...base, page: p[2] };
+    if (p[2] === 'data' || p[2] === 'imports' || p[2] === 'disclosure') return { ...base, page: p[2] };
     if (p[2] !== 'a' || !p[3]) return null;
     if (p[4] === 'h') return { ...base, page: 'stock', id: p[3], symbol: p[5] };
     return { ...base, page: p[4] || 'account', id: p[3] };
@@ -1304,7 +1316,7 @@ view.addEventListener('click', async e => {
         if (!isBackup(res.data)) return toast('The Drive file is not a SuperApp backup.');
         const how = await chooseImport(`the Drive backup from ${when}`);
         if (!how) return;
-        const { added, updated } = await runImport(res.data, how);
+        const { added, updated } = await runImport(res.data, how, 'Google Drive backup');
         toast(how === 'replace' ? 'Replaced everything with the Drive backup' : `Restored: ${added} new, ${updated} updated`);
       });
   }
@@ -1349,8 +1361,9 @@ async function init() {
   initRetirals(helpers);
   initLoans(helpers);
   initNetworth(helpers);
+  initImportLog(helpers);
   try {
-    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'retiralAccounts', 'retiralEntries', 'retiralStatements', 'loans', 'market', 'priceMonths'];
+    const stores = ['notebooks', 'notes', 'payments', 'paymentRecords', 'paymentCategories', 'paymentTypes', 'brokerAccounts', 'trades', 'brokerHoldings', 'portfolioActions', 'portfolioNotes', 'earnContracts', 'transfers', 'brokerFees', 'retiralAccounts', 'retiralEntries', 'retiralStatements', 'loans', 'importLog', 'market', 'priceMonths'];
     (await Promise.all(stores.map(db.all))).forEach((rows, i) => { S[stores[i]] = rows; });
   } catch (e) {
     view.innerHTML = `<div class="empty">${icon('file')}<p>Could not open local storage: ${esc(e.message)}</p></div>`;

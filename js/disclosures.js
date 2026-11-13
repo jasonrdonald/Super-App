@@ -90,7 +90,7 @@ export const BACKUP_FILES = [
   { id: 'crypto', label: 'Crypto', parts: [['Monthly open and close, in rupees', 'yahoo'], ['Latest price and day change', 'coingecko']] },
   { id: 'mutual-funds', label: 'Mutual funds', parts: [['Each month\'s first and last NAV', 'mfapi'], ['Latest NAV and scheme code', 'mfapi']] },
   { id: 'fx', label: 'Currency rates', parts: [['Latest USD to INR rate', 'tradingview']] },
-  { id: 'indices', label: 'Benchmark indices', parts: [['Monthly open and close of Nifty 50, Next 50, Midcap 150, Smallcap 250, Nifty 500, Nasdaq 100 and S&P 500', 'yahoo'], ['Latest close, P/E, P/B and dividend yield of Nifty indices', 'nseIndices'], ['Nifty index P/E and P/B at each month-end, under IX:pe', 'nseIndices']] },
+  { id: 'indices', label: 'Benchmark indices', parts: [['Monthly open and close of Nifty 50, Next 50, Midcap 150, Smallcap 250, Nifty 500, Nasdaq 100 and S&P 500', 'yahoo'], ['Latest close, P/E, P/B and dividend yield of Nifty indices', 'nseIndices'], ['Nifty index P/E and P/B at each month-end, under IX:pe', 'nseIndices'], ['Latest level and change of the market strip\'s indices and coins, under IX:live', 'tradingview']] },
 ];
 
 export const backupSources = id => Object.fromEntries(BACKUP_FILES.find(f => f.id === id).parts.map(([what, source]) => [what, SOURCES[source].name]));
@@ -126,6 +126,7 @@ export const BACKUP_NEEDS_NOTHING = 'Bonuses, mergers, demergers, and rights and
 
 // id, label, the sources behind it, and how it's worked out when that isn't obvious.
 export const DATA_POINTS = [
+  { id: 'tickers', label: 'Market strip: indices and coins', sources: ['tradingview', 'yahoo', 'coingecko'], how: 'Nifty 50, Nifty Next 50, S&P 500 and Nasdaq 100 levels and their changes from TradingView, delayed. Nifty Midcap 150 from Yahoo Finance\x27s daily closes, as TradingView doesn\x27t carry it. BTC and ETH in rupees from CoinGecko, with 6M and YTD from its year of daily prices, kept a day. Loaded at most once an hour, and each change is the index\x27s own move over the period chosen under the summary.' },
   { id: 'change', label: 'Change over 1D, 5D, 1M, 6M, YTD and 1Y', sources: ['tradingview', 'mfapi', 'coingecko'], how: '1D is the day\'s change. The rest show how much what you hold today moved over the period, as if you had held it throughout, so buys and sales during the period aren\'t counted. Stocks and ETFs use TradingView\'s own changes, where 5D is the past week. Funds use their daily NAVs from MFapi.in, from the last NAV on or before the period\'s start. Crypto\'s week, month and year come from CoinGecko with the price; its 6M and YTD need a year of daily prices per coin, which the free service limits, so they fill in over a few refreshes and are kept for a day. A holding not yet priced over a period is left out and counted in the note.' },
   { id: 'price', label: 'Last price, market value, day gain', sources: ['tradingview', 'mfapi', 'coingecko'], how: 'Indian and US stocks and ETFs from TradingView, funds from MFapi.in, crypto from CoinGecko. Falls back to the holdings file\'s price.' },
   { id: 'fx', label: 'USD to INR rate', sources: ['tradingview'], how: 'The latest rate converts all USD figures on the main Portfolio and Consolidated pages, including cost, so they show today\'s rupee value, not the rate you bought at.' },

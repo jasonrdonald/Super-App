@@ -4,11 +4,12 @@ import { CONFIG } from './config.js';
 import { shortAmounts, shortMoney } from './format.js';
 import { CHANGE_PERIODS, ISSUE_LABEL, xirr, costHeldAt, baseSymbol, allActions, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
-import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, cryptoStarts, listedSecurities, setOffline, EVENT_GAP_MS } from './market.js';
+import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, cryptoStarts, listedSecurities, setOffline, marketTickers, MARKET_TICKERS, EVENT_GAP_MS } from './market.js';
 import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, unzipFiles } from './public-data.js';
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { createMilestones } from './milestones.js';
 import { reportHtml, printReport } from './portfolio-report.js';
+import { logImport, IMPORT_CATEGORIES, daysSince } from './import-log.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS, BACKUP_FILES, BACKUP_CONTENTS, BACKUP_LEAVES_OUT, BACKUP_NEEDS_NOTHING } from './disclosures.js';
 import { GROUPINGS, bandOf, orderBands, RATING_SCALES, momentumRating, growthRating, valuationRating, profitabilityRating, verdictRating } from './ratings.js';
@@ -176,6 +177,8 @@ const pct = v => (v == null ? '–' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`);
 const qtyText = v => (isPrivate() ? MASK : new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: Math.abs(v) < 1 ? 8 : 3 }).format(v));
 const tone = v => (v == null || Math.abs(v) < 0.005 ? '' : v > 0 ? 'up' : 'down');
 const day = s => A.fmt(new Date(`${s}T00:00:00`), { dateStyle: 'medium' });
+// A time as its local yyyy-mm-dd.
+const isoDay = t => { const d = new Date(t); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 
 /* ---------- derived data ---------- */
 
@@ -372,12 +375,13 @@ export const portfolioNav = () => [
   { id: 'analysis', name: 'Analysis', icon: 'chart', href: `${HOME}/analysis` },
   { id: 'transfers', name: 'Transfers', icon: 'swap', href: `${HOME}/transfers` },
   ...(accounts().length ? [{ id: 'brokers', name: 'Brokers', icon: 'briefcase', children: accounts().map(a => ({ id: a.id, name: a.name, icon: a.kind === 'crypto' ? 'cloud' : a.kind === 'mf' ? 'chart' : 'card', href: accountPath(a.id) })) }] : []),
+  { id: 'imports', name: 'Data imports', icon: 'clock', href: `${HOME}/imports`, foot: true },
   { id: 'data', name: 'Data sources', icon: 'settings', href: `${HOME}/data`, foot: true },
   { id: 'disclosure', name: 'Data disclosure', icon: 'info', href: `${HOME}/disclosure`, foot: true },
 ];
 
 export function portfolioRouteValid(r) {
-  if (['home', 'add', 'reports', 'analysis', 'transfers', 'consolidated', 'data', 'disclosure'].includes(r.page)) return true;
+  if (['home', 'add', 'reports', 'analysis', 'transfers', 'consolidated', 'data', 'imports', 'disclosure'].includes(r.page)) return true;
   if (!accountById(r.id)) return false;
   if (r.page === 'stock') return !!computed(accountById(r.id)).positions.get(r.symbol);
   return ['account', 'reconcile', 'trade'].includes(r.page);
@@ -493,8 +497,78 @@ async function refreshQuotes() {
   }
   await db.putMany('market', changed);
   A.ls.set('pfQuotedAt', t);
+  const kinds = changed.reduce((n, m) => {
+    const k = m.symbol === FX_KEY ? 'USD rate' : m.symbol.startsWith(US_PREFIX) ? 'US stocks' : m.symbol.startsWith(CRYPTO_PREFIX) ? 'coins' : m.symbol.startsWith('IX:') ? 'index figures' : m.schemeCode ? 'fund NAVs' : 'Indian stocks';
+    n[k] = (n[k] ?? 0) + 1;
+    return n;
+  }, {});
+  if (changed.length) logImport({ category: 'public', source: 'Prices', what: 'Latest prices', points: changed.length, detail: Object.entries(kinds).map(([k, n]) => `${n} ${k}`).join(', '), dataTo: isoDay(t) });
   return changed.length;
 }
+
+/* ---------- market strip: benchmark indices and coins ---------- */
+
+// Kept with the rest of the public data, and fetched at most once an hour.
+const tickerKey = id => `IX:live:${id}`;
+const TICKERS_MAX_AGE = 60 * 60 * 1000;
+let tickersLoading = false;
+let tickersTimer = null;
+
+async function refreshTickers() {
+  // While a page with the strip stays open, it checks back every few minutes for the next hour's data.
+  tickersTimer ??= setInterval(() => { if (document.visibilityState === 'visible' && A.$('.pf-tickers')) refreshTickers(); }, 5 * 60 * 1000);
+  const t = Date.now();
+  if (tickersLoading || dataMode() === 'backup' || t - A.ls.get('pfTickersAt', 0) < TICKERS_MAX_AGE) return;
+  tickersLoading = true;
+  try {
+    // The coins' 6M and YTD need a call each that the free service limits, so they're kept a day.
+    const kept = id => A.S.market.find(m => m.symbol === tickerKey(id));
+    const coinLong = MARKET_TICKERS.some(x => x.coin && !(kept(x.id)?.longAt > t - 864e5));
+    const quotes = await marketTickers({ coinLong });
+    const changed = [];
+    quotes.forEach(({ long, ...q }, id) => {
+      const old = kept(id);
+      const fresh = long || !old?.longAt || old.longAt < t - 864e5;
+      const perf = fresh ? q.perf : { '6m': old.perf?.['6m'], ytd: old.perf?.ytd, ...q.perf };
+      const name = MARKET_TICKERS.find(x => x.id === id).name;
+      changed.push(saveMarket(tickerKey(id), { ...q, perf, name, quotedAt: t, ...(long ? { longAt: t } : {}) }));
+    });
+    await db.putMany('market', changed);
+    A.ls.set('pfTickersAt', t);
+    logImport({ category: 'public', source: 'Markets strip', what: 'Index and coin levels', points: changed.length, detail: changed.map(m => m.name).join(', '), dataTo: isoDay(t) });
+    if (A.$('.pf-tickers')) redraw();
+  } catch {
+    // Left as it was; the next visit tries again.
+  } finally {
+    tickersLoading = false;
+  }
+}
+
+// The strip of benchmark levels with their change over the chosen period. `markets`
+// picks Indian, US or crypto tickers; all of them when left out.
+function tickerStrip(markets) {
+  const k = changePeriod();
+  const list = MARKET_TICKERS.filter(x => !markets || markets.includes(x.market));
+  if (!list.length) return '';
+  const level = new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  const rupees = new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 0 });
+  const items = list.map(x => {
+    const m = A.S.market.find(r => r.symbol === tickerKey(x.id));
+    const p = m ? (k === '1d' ? m.changePct : m.perf?.[k]) : null;
+    const value = m?.price == null ? '–' : x.market === 'crypto' ? `₹${rupees.format(m.price)}` : level.format(m.price);
+    return `<div class="pf-ticker" title="${A.esc(x.name)}"><span class="pf-ticker-name">${A.esc(x.short ?? x.name)}</span><span class="pf-ticker-value">${value}</span>
+      <span class="pf-ticker-change ${tone(p)}">${p == null ? (m ? `No ${PERIOD_LABELS[k]} yet` : 'Not loaded') : pct(p)}</span></div>`;
+  }).join('');
+  const at = A.ls.get('pfTickersAt', 0);
+  const title = markets?.length === 1 ? { in: 'Indian indices', us: 'US indices', crypto: 'Crypto' }[markets[0]] : 'Markets';
+  return `<section class="pf-tickers" aria-label="${title}">
+    <div class="pf-tickers-head"><h2 class="small-head">${title}${info('tickers')}</h2><span class="muted small">${PERIOD_LABELS[k]} · ${at ? `updated ${A.relDate(at)}, hourly` : 'loads hourly'}</span></div>
+    <div class="pf-ticker-row">${items}</div>
+  </section>`;
+}
+
+// Which benchmarks suit a broker: its own market's.
+const accountMarkets = account => (account.kind === 'crypto' ? ['crypto'] : isUsd(account) ? ['us'] : ['in']);
 
 function eventSymbols() {
   const t = Date.now();
@@ -559,8 +633,16 @@ async function refreshEvents() {
     await new Promise(r => setTimeout(r, Math.max(0, EVENT_GAP_MS - (Date.now() - started))));
   }
   job.running = false;
+  logJob('Splits and dividends', 'Splits and dividends history');
   redraw();
   refreshMonthly();
+}
+
+// One entry for a background load once it finishes, with what failed.
+function logJob(source, what) {
+  const ok = job.done - job.failed;
+  if (!job.done) return;
+  logImport({ category: 'public', source, what, points: ok, detail: `${ok} of ${job.total} ${job.what === 'index P/E history' ? 'months' : 'tickers'} loaded${job.failed ? `, ${job.failed} failed` : ''}`, dataTo: isoDay(Date.now()) });
 }
 
 const showMarketHistory = () => A.ls.get('pfTimelineMarket', false);
@@ -629,6 +711,7 @@ async function refreshMonthly() {
     if (x.kind !== 'fund') await new Promise(r => setTimeout(r, Math.max(0, EVENT_GAP_MS - (Date.now() - started))));
   }
   job.running = false;
+  logJob('Monthly prices', 'Monthly open and close');
   redraw();
   refreshPeHistory();
 }
@@ -670,6 +753,7 @@ async function refreshPeHistory() {
     await new Promise(r => setTimeout(r, Math.max(0, EVENT_GAP_MS - (Date.now() - started))));
   }
   job.running = false;
+  logJob('Index P/E history', 'Month-end index P/E and P/B');
   redraw();
 }
 
@@ -952,6 +1036,7 @@ async function restoreBackup(file) {
   A.markDirty();
   invalidate();
   A.toast(`Imported ${A.plural(added, 'new broker')} and ${A.plural(trades, 'new trade')}`);
+  logImport({ category: 'backup', source: 'Brokers backup', what: `${A.plural(accountsIn.length, 'broker')} imported${v.clear ? ', existing brokers cleared' : ''}`, points: added + trades, detail: `${brokers}: ${A.plural(added, 'new broker')}, ${A.plural(trades, 'new or updated trade')} of ${tradesIn.length} in the file` });
   firstVisit = true;
   if (A.S.route.page === 'home') A.refresh();
   else A.go(HOME, true);
@@ -975,6 +1060,7 @@ function homeView(r) {
   const body = list.length
     ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
+        ${tickerStrip()}
         <div class="status" id="pf-status">${statusLine()}</div>
         ${fxNote(list)}
         ${backupButtons(add)}
@@ -1140,6 +1226,15 @@ async function loadFiles(account, files) {
   await A.persist('brokerAccounts', account);
   invalidate();
   A.toast(`Loaded ${A.plural(fresh.length, 'new trade')}${latest ? ` and holdings as on ${day(latest.asOf)}` : ''}${skipped ? `, skipped ${skipped} other rows` : ''}`);
+  if (parsed.length) {
+    const lastTrade = fresh.reduce((d, t) => (t.date > d ? t.date : d), '');
+    const dataTo = [lastTrade, latest?.asOf ?? ''].sort().at(-1);
+    const parts = [A.plural(fresh.length, 'new trade'), latest && `holdings as on ${day(latest.asOf)} (${A.plural(latest.holdings.length, 'row')})`, fees.length && A.plural(fees.length, 'fee'), contracts.length && A.plural(contracts.length, 'Earn contract'), skipped && `${skipped} other rows skipped`].filter(Boolean);
+    logImport({
+      category: 'broker', source: account.name, accountId: account.id, what: `${A.plural(parsed.length, 'file')} loaded`,
+      points: fresh.length + (latest?.holdings.length ?? 0) + fees.length + contracts.length, detail: parts.join(', '), dataTo,
+    });
+  }
   refreshMarket();
 }
 
@@ -1318,6 +1413,7 @@ function accountView(r) {
     ${hero(account.name, `${account.broker} · ${KINDS[account.kind]}${account.clientId ? ` · ${account.clientId}` : ''}`, HOME,
       `<button class="icon-btn" data-act="pf-menu" data-id="${account.id}" aria-label="Account options">${icon('more')}</button>`)}
     <div class="scroll"><div class="pay-page pf-page">
+      ${tickerStrip(accountMarkets(account))}
       ${holdingsBody(account, c, { tools })}
       ${feesPanel(account, c)}
     </div></div>
@@ -2983,6 +3079,123 @@ async function backupPublic() {
   saved(`Saved ${A.plural(files.length - 1, 'month file')} to ${folder.name}`);
 }
 
+/* ---------- data imports timeline ---------- */
+
+// Brokers loaded before the timeline existed get one entry each, from what they hold,
+// so every broker shows up. Done once.
+async function seedImportLog() {
+  if (A.ls.get('pfImportsSeeded', false)) return 0;
+  A.ls.set('pfImportsSeeded', true);
+  const logged = new Set(A.S.importLog.map(e => e.accountId).filter(Boolean));
+  const seeds = accounts().filter(a => !logged.has(a.id)).map(a => {
+    const file = holdingsOf(a.id);
+    const trades = A.S.trades.filter(t => t.accountId === a.id);
+    const at = file?.updatedAt ?? a.updatedAt ?? a.createdAt ?? Date.now();
+    return {
+      id: A.uid(), at, category: 'broker', source: a.name, accountId: a.id, what: 'Loaded before the timeline began', estimated: true,
+      points: trades.length + (file?.rows.length ?? 0), detail: `${A.plural(trades.length, 'trade')}${file ? `, holdings as on ${day(file.asOf)} (${A.plural(file.rows.length, 'row')})` : ''}. The time is when the broker was last changed.`,
+      dataTo: brokerDataTo(a), updatedAt: at,
+    };
+  });
+  if (!seeds.length) return 0;
+  A.S.importLog.push(...seeds);
+  await db.putMany('importLog', seeds);
+  return seeds.length;
+}
+
+// The latest date a broker's data covers: its last trade or its holdings file's date.
+function brokerDataTo(account) {
+  const last = A.S.trades.reduce((d, t) => (t.accountId === account.id && t.date > d ? t.date : d), '');
+  return [last, holdingsOf(account.id)?.asOf ?? ''].sort().at(-1);
+}
+
+const daysText = n => (n == null ? '–' : n === 0 ? 'Today' : A.plural(n, 'day'));
+// Stale past `limit` days shows in red, so what needs loading stands out.
+const ageCell = (n, limit) => `<td class="num ${n != null && n > limit ? 'down' : ''}">${daysText(n)}</td>`;
+
+function publicFreshness() {
+  const market = A.S.market;
+  const newest = list => list.reduce((t, v) => (v > t ? v : t), 0);
+  const quotedAt = A.ls.get('pfQuotedAt', 0);
+  const tickersAt = A.ls.get('pfTickersAt', 0);
+  const events = market.filter(m => m.eventsAt).map(m => m.eventsAt);
+  const series = A.S.priceMonths.filter(m => !/^(EP|IX:pe):/.test(m.symbol));
+  const pe = A.S.priceMonths.filter(m => m.symbol.startsWith('IX:pe:'));
+  const peLast = pe.flatMap(m => Object.keys(m.months ?? {})).sort().at(-1);
+  const fx = market.find(m => m.symbol === FX_KEY);
+  const nse = market.find(m => m.symbol === benchmarkKey('nifty50'));
+  const sector = market.find(m => m.symbol === SECTOR_PE_KEY);
+  const backupAt = A.ls.get('pfPublicBackupAt', 0);
+  return [
+    { label: 'Latest prices', at: quotedAt, points: quotedAt ? market.filter(m => (m.quotedAt ?? 0) >= quotedAt - 60000 && !m.symbol.startsWith('IX:')).length : 0, limit: 1, note: 'Stocks, funds and coins' },
+    { label: 'Markets strip', at: tickersAt, points: market.filter(m => m.symbol.startsWith('IX:live:')).length, limit: 1, note: 'Loads hourly' },
+    { label: 'USD to INR rate', at: fx?.quotedAt ?? 0, points: fx ? 1 : 0, limit: 1 },
+    { label: 'Splits and dividends', at: newest(events), points: events.length, limit: 7, note: events.length ? `${A.plural(events.length, 'ticker')}, oldest loaded ${daysSince(Math.min(...events)) ? `${A.plural(daysSince(Math.min(...events)), 'day')} ago` : 'today'}` : '' },
+    { label: 'Monthly prices', at: newest(series.map(m => m.at ?? 0)), points: series.reduce((n, m) => n + Object.keys(m.months ?? {}).length, 0), limit: 7, note: `${A.plural(series.length, 'ticker')}` },
+    { label: 'Index P/E and P/B', at: nse?.quotedAt ?? 0, points: market.filter(m => /^IX:[a-z0-9]+$/.test(m.symbol) && m.f?.pe != null).length, limit: 7, note: nse?.f?.asOf ? `NSE file of ${nse.f.asOf}` : '' },
+    { label: 'Index P/E history', at: newest(pe.map(m => m.at ?? 0)), points: pe.reduce((n, m) => n + Object.keys(m.months ?? {}).length, 0), limit: 40, note: peLast ? `To ${monthText(peLast, { month: 'short', year: 'numeric' })}` : 'Loads when Metrics opens' },
+    { label: 'Sector P/Es', at: sector?.quotedAt ?? 0, points: sector ? Object.keys(sector.f ?? {}).length : 0, limit: 7 },
+    { label: 'Public data backup saved', at: backupAt, points: 0, limit: 30, note: 'Your own copy on this device' },
+  ];
+}
+
+function importsView() {
+  seedImportLog().then(n => { if (n && A.S.route?.page === 'imports') importsView(); });
+  const cat = A.ls.get('pfImportsCategory', 'all');
+  const log = [...A.S.importLog].sort((a, b) => b.at - a.at);
+  const counts = Object.fromEntries(Object.keys(IMPORT_CATEGORIES).map(k => [k, log.filter(e => e.category === k).length]));
+  const shownLog = log.filter(e => cat === 'all' || e.category === cat);
+  const LIMIT = 300;
+  const lastLoad = id => log.find(e => e.accountId === id);
+  const time = t => A.fmt(new Date(t), { timeStyle: 'short' });
+  const days = Object.entries(Object.groupBy(shownLog.slice(0, LIMIT), e => isoDay(e.at)));
+  const brokers = accounts().map(a => {
+    const to = brokerDataTo(a);
+    const loaded = lastLoad(a.id);
+    return `<tr><th scope="row"><a href="${accountPath(a.id)}">${A.esc(a.name)}</a><small>${A.esc(a.broker)} · ${KINDS[a.kind]}</small></th>
+      <td class="num">${to ? day(to) : '–'}</td>${ageCell(daysSince(to), 30)}
+      <td class="num">${loaded ? `${A.relDate(loaded.at)}${loaded.estimated ? '<small>Before the timeline</small>' : ''}` : '–'}</td>${ageCell(loaded ? daysSince(loaded.at) : null, 30)}</tr>`;
+  }).join('');
+  const pub = publicFreshness().map(x => `<tr><th scope="row">${x.label}${x.note ? `<small>${A.esc(x.note)}</small>` : ''}</th>
+    <td class="num">${x.at ? A.relDate(x.at) : 'Never'}</td>${ageCell(x.at ? daysSince(x.at) : null, x.limit)}<td class="num">${x.points ? x.points.toLocaleString(CONFIG.locale) : '–'}</td></tr>`).join('');
+  const chip = (k, label, n) => `<button data-cat="${k}" aria-pressed="${cat === k}">${label}${n != null ? ` <span class="muted">${n}</span>` : ''}</button>`;
+  A.view.innerHTML = `${hero('Data imports', A.plural(log.length, 'load') + ' on the timeline', HOME)}
+    <div class="scroll"><div class="pay-page pf-page">
+      <section class="panel">
+        <h2>Broker data</h2>
+        <p class="muted small chart-note">Data up to is the last trade or holdings date in the files loaded. Over 30 days behind shows in red: load newer tradebooks and holdings from the broker.</p>
+        <div class="holdings-wrap"><table class="holdings pf-summary">
+          <thead><tr><th>Broker</th><th class="num">Data up to</th><th class="num">Days behind</th><th class="num">Last loaded</th><th class="num">Days since</th></tr></thead>
+          <tbody>${brokers || '<tr><td colspan="5" class="muted">No brokers yet</td></tr>'}</tbody>
+        </table></div>
+      </section>
+      <section class="panel">
+        <h2>Public data${info('publicData')}</h2>
+        <p class="muted small chart-note">${dataMode() === 'backup' ? 'Public data is set to local backup, so nothing downloads and these only change when you import a backup.' : 'Prices refresh every 6 hours when Portfolio opens, or with Refresh. Splits, dividends and monthly prices refresh weekly in the background.'}</p>
+        <div class="holdings-wrap"><table class="holdings pf-summary">
+          <thead><tr><th>Data</th><th class="num">Updated</th><th class="num">Days old</th><th class="num">Data points</th></tr></thead>
+          <tbody>${pub}</tbody>
+        </table></div>
+      </section>
+      <section class="panel">
+        <h2>Timeline</h2>
+        <div class="seg pf-assets pf-import-cats" role="group" aria-label="Category">${chip('all', 'All', log.length)}${Object.entries(IMPORT_CATEGORIES).map(([k, l]) => chip(k, l, counts[k])).join('')}</div>
+        ${days.length ? days.map(([d, list]) => `<h3 class="pf-import-day">${daysSince(d) === 0 ? 'Today' : daysSince(d) === 1 ? 'Yesterday' : day(d)}<span class="muted small"> · ${A.plural(list.length, 'load')}</span></h3>
+          <ol class="pf-import-list">${list.map(e => `<li class="pf-import cat-${e.category}">
+            <span class="pf-import-time">${time(e.at)}</span>
+            <div class="pf-import-body"><div class="pf-import-title"><span class="pf-import-cat">${IMPORT_CATEGORIES[e.category]}</span><strong>${A.esc(e.source)}</strong></div>
+              <div>${A.esc(e.what)}</div>
+              ${e.detail ? `<div class="muted small">${A.esc(e.detail)}</div>` : ''}
+              <div class="muted small">${e.points.toLocaleString(CONFIG.locale)} data ${e.points === 1 ? 'point' : 'points'}${e.dataTo ? ` · data up to ${day(e.dataTo)}` : ''}</div></div>
+          </li>`).join('')}</ol>`).join('')
+          : `<p class="muted">${log.length ? 'Nothing in this category yet.' : 'Nothing loaded yet. Each broker file, public data refresh, retirals or loan statement and backup import shows here as it happens.'}</p>`}
+        ${shownLog.length > LIMIT ? `<p class="muted small">Showing the latest ${LIMIT} of ${shownLog.length}.</p>` : ''}
+        <p class="muted small chart-note">Entries keep counts and dates only, never file names or amounts, and are saved in the app backup. The oldest go once there are 2,000.</p>
+      </section>
+    </div></div>`;
+  A.view.querySelectorAll('[data-cat]').forEach(b => b.addEventListener('click', () => { A.ls.set('pfImportsCategory', b.dataset.cat); importsView(); }));
+}
+
 async function importPublic(files) {
   try {
     const texts = [];
@@ -3004,7 +3217,15 @@ async function importPublic(files) {
     if (latest > A.ls.get('pfQuotedAt', 0)) A.ls.set('pfQuotedAt', latest);
     invalidate();
     A.refresh();
-    A.toast(`Imported ${A.plural(used, 'month file')} covering ${A.plural(new Set([...bySymbol.keys(), ...series.keys()]).size, 'ticker')}`);
+    const tickers = new Set([...bySymbol.keys(), ...series.keys()]).size;
+    A.toast(`Imported ${A.plural(used, 'month file')} covering ${A.plural(tickers, 'ticker')}`);
+    const months = priceMonths.reduce((n, m) => n + Object.keys(m.months ?? {}).length, 0);
+    const lastMonth = priceMonths.flatMap(m => Object.keys(m.months ?? {})).sort().at(-1);
+    logImport({
+      category: 'public', source: 'Public data backup', what: `${A.plural(used, 'month file')} imported`, points: clean.length + months,
+      detail: `${A.plural(tickers, 'ticker')}: ${A.plural(clean.length, 'latest price')} and ${A.plural(months, 'monthly price')}`,
+      dataTo: latest ? isoDay(latest) : lastMonth ? `${lastMonth}-01` : '',
+    });
   } catch (e) {
     A.toast(`Could not import: ${e.message}`);
   }
@@ -3468,12 +3689,15 @@ export function portfolioView(r) {
   else if (r.page === 'reports' || r.page === 'analysis') reportsView(r);
   else if (r.page === 'transfers') transfersView();
   else if (r.page === 'data') dataView();
+  else if (r.page === 'imports') importsView();
   else if (r.page === 'disclosure') disclosureView();
   else if (r.page === 'account') accountView(r);
   else if (r.page === 'stock') stockView(r);
   else if (r.page === 'reconcile') reconcileView(r);
   else if (r.page === 'trade') tradeView(r);
   else homeView(r);
+  // The strip's indices load at most once an hour, whenever a page showing it opens.
+  if (A.$('.pf-tickers')) refreshTickers();
   if (!A.S.brokerAccounts.length || !firstVisit) return;
   // Once per launch: picks up a stale market, or a load cut short by closing the app.
   firstVisit = false;

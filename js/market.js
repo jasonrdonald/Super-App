@@ -179,6 +179,88 @@ export async function sectorPes() {
   return Object.fromEntries([...bySector].filter(([, list]) => list.length >= 5).map(([sector, list]) => [sector, list.sort((a, b) => a - b)[Math.floor(list.length / 2)]]));
 }
 
+/* ---------- benchmark indices and coins, for the market strip ---------- */
+
+// Each benchmark and where its level comes from. TradingView's scanner doesn't carry
+// Nifty Midcap 150, so it comes from Yahoo's daily chart, and its INR coin pairs are
+// stale, so coins come from CoinGecko like held coins do.
+export const MARKET_TICKERS = [
+  { id: 'nifty50', name: 'Nifty 50', market: 'in', tv: ['india', 'NSE:NIFTY'] },
+  { id: 'next50', name: 'Nifty Next 50', market: 'in', tv: ['india', 'NSE:NIFTYJR'] },
+  { id: 'mid150', name: 'Nifty Midcap 150', short: 'Midcap 150', market: 'in', yahoo: 'NIFTYMIDCAP150.NS' },
+  { id: 'sp500', name: 'S&P 500', market: 'us', tv: ['america', 'SP:SPX'] },
+  { id: 'nasdaq100', name: 'Nasdaq 100', market: 'us', tv: ['america', 'NASDAQ:NDX'] },
+  { id: 'btcinr', name: 'BTC/INR', market: 'crypto', coin: 'bitcoin' },
+  { id: 'ethinr', name: 'ETH/INR', market: 'crypto', coin: 'ethereum' },
+];
+
+const PERF_COLUMNS = ['Perf.W', 'Perf.1M', 'Perf.6M', 'Perf.YTD', 'Perf.Y'];
+const pctFromStarts = (price, starts) => Object.fromEntries(Object.entries(starts).map(([k, v]) => [k, (price / v - 1) * 100]));
+
+// Resolves to a Map of id to { price, change, changePct, perf }, where perf holds the
+// percentage change over 5D, 1M, 6M, YTD and 1Y. `coinLong` says whether to also ask
+// for the coins' 6M and YTD, a call per coin that the free service limits. Tickers
+// that fail are left out, so one source being down doesn't hide the rest.
+export async function marketTickers({ coinLong = true } = {}) {
+  const out = new Map();
+  const jobs = [];
+  const byMarket = new Map();
+  for (const t of MARKET_TICKERS.filter(t => t.tv)) byMarket.set(t.tv[0], [...(byMarket.get(t.tv[0]) ?? []), t]);
+  for (const [market, list] of byMarket) {
+    jobs.push((async () => {
+      const res = await web(`https://scanner.tradingview.com/${market}/scan`, {
+        method: 'POST', signal: timed(),
+        body: JSON.stringify({ symbols: { tickers: list.map(t => t.tv[1]) }, columns: ['close', 'change', 'change_abs', ...PERF_COLUMNS] }),
+      });
+      if (!res.ok) throw new Error(`Price service answered ${res.status}`);
+      for (const { s, d } of (await res.json()).data ?? []) {
+        const t = list.find(x => x.tv[1] === s);
+        if (!t || d[0] == null) continue;
+        const perf = Object.fromEntries(PERIODS.map((k, i) => [k, d[3 + i]]).filter(([, v]) => Number.isFinite(v)));
+        out.set(t.id, { price: d[0], changePct: d[1], change: d[2], perf });
+      }
+    })());
+  }
+  for (const t of MARKET_TICKERS.filter(t => t.yahoo)) {
+    jobs.push((async () => {
+      const result = await yahooChart(t.yahoo, new Date(Date.now() - 380 * 864e5).toISOString().slice(0, 10), 'interval=1d');
+      const closes = result?.indicators?.quote?.[0]?.close ?? [];
+      const points = (result?.timestamp ?? []).map((ts, i) => [dayOf(ts), closes[i]]).filter(p => p[1] != null);
+      if (!points.length) return;
+      const price = result.meta?.regularMarketPrice ?? points.at(-1)[1];
+      // The last point is today's while the market is open or once it has closed.
+      const prev = points.at(-1)[0] === dayOf(result.meta?.regularMarketTime ?? 0) ? points.at(-2)?.[1] : points.at(-1)[1];
+      const change = prev ? price - prev : null;
+      out.set(t.id, { price, change, changePct: prev ? change / prev * 100 : null, perf: pctFromStarts(price, seriesStarts(points)) });
+    })());
+  }
+  const coins = MARKET_TICKERS.filter(t => t.coin);
+  jobs.push((async () => {
+    const res = await web(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=inr&ids=${coins.map(t => t.coin).join(',')}&price_change_percentage=24h,7d,30d,1y`, { signal: timed() });
+    if (!res.ok) throw new Error(`Crypto service answered ${res.status}`);
+    for (const q of await res.json()) {
+      const t = coins.find(x => x.coin === q.id);
+      const price = q.current_price;
+      if (!t || price == null) continue;
+      const changePct = q.price_change_percentage_24h_in_currency ?? q.price_change_percentage_24h ?? null;
+      const perf = Object.fromEntries([['5d', q.price_change_percentage_7d_in_currency], ['1m', q.price_change_percentage_30d_in_currency], ['1y', q.price_change_percentage_1y_in_currency]].filter(([, v]) => Number.isFinite(v)));
+      out.set(t.id, { price, changePct, change: changePct == null ? null : price - price / (1 + changePct / 100), perf });
+    }
+    if (!coinLong) return;
+    for (const t of coins) {
+      const q = out.get(t.id);
+      if (!q) continue;
+      const long = await cryptoStarts(t.coin);
+      if (!long) break;
+      Object.assign(q.perf, pctFromStarts(q.price, long));
+      q.long = true;
+    }
+  })());
+  const results = await Promise.allSettled(jobs);
+  if (!out.size) throw results.find(r => r.status === 'rejected')?.reason ?? new Error('No market data');
+  return out;
+}
+
 /* ---------- splits and dividends: Yahoo Finance, through a reader that relays it ---------- */
 
 export const EVENT_GAP_MS = 3300;

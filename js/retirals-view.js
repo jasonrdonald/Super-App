@@ -7,6 +7,7 @@ import * as db from './db.js';
 import { CONFIG } from './config.js';
 import { shortAmounts, shortMoney } from './format.js';
 import { pdfLines } from './pdf-text.js';
+import { logImport } from './import-log.js';
 import { parsePassbook, accountSummary } from './epf.js';
 import { parseReceipts, policySummary, MODES } from './lic.js';
 import { parseStatement as parseNpsStatement, npsSummary, schemeName, transactionKind } from './nps.js';
@@ -39,6 +40,7 @@ const summaryOf = id => accountSummary(A.S.retiralStatements.filter(s => s.accou
 export const retiralsNav = () => [
   { id: 'home', name: 'Overview', icon: 'pie', href: HOME },
   ...accounts().map(a => ({ id: a.id, name: a.name, icon: isPolicy(a) ? 'shield' : isNps(a) ? 'chart' : 'briefcase', href: accountPath(a.id) })),
+  { id: 'imports', name: 'Data imports', icon: 'clock', href: '#/s/portfolio/imports', foot: true },
 ];
 
 export const retiralsRouteValid = r => !['account', 'lic-edit'].includes(r.page) || !!accountById(r.id);
@@ -464,24 +466,32 @@ async function savePassbook(p) {
 // an EPF passbook PDF or an LIC premium receipt PDF.
 async function loadFiles(files) {
   const done = { passbook: 0, statement: 0, receipt: 0 };
-  let unchecked = 0;
+  let unchecked = 0, points = 0, dataTo = '';
   const problems = [];
+  // Counts each file's rows and its latest date for the import timeline.
+  const seen = list => { points += list.length; list.forEach(x => { if (x.date > dataTo) dataTo = x.date; }); };
   for (const file of files) {
     try {
       if (/\.csv$/i.test(file.name)) {
-        const statement = await saveNps(parseNpsStatement(await file.text()));
+        const parsed = parseNpsStatement(await file.text());
+        const statement = await saveNps(parsed);
+        seen(parsed.transactions);
         done.statement++;
         if (!statement.matches) unchecked++;
         continue;
       }
       const lines = await pdfLines(await file.arrayBuffer());
       if (lines.some(l => /Renewal Premium Receipt/.test(l))) {
-        const { saved, problems: more } = await saveReceipts(parseReceipts(lines));
+        const receipts = parseReceipts(lines);
+        const { saved, problems: more } = await saveReceipts(receipts);
+        seen(receipts);
         done.receipt += saved;
         problems.push(...more);
         continue;
       }
-      const statement = await savePassbook(parsePassbook(lines));
+      const passbook = parsePassbook(lines);
+      const statement = await savePassbook(passbook);
+      seen(passbook.entries);
       done.passbook++;
       if (!statement.matches) unchecked++;
     } catch (e) {
@@ -493,6 +503,7 @@ async function loadFiles(files) {
   const loaded = [done.passbook && A.plural(done.passbook, 'EPF passbook'), done.statement && A.plural(done.statement, 'NPS statement'), done.receipt && A.plural(done.receipt, 'LIC receipt')].filter(Boolean).join(', ');
   const checked = loaded && (unchecked ? `${unchecked} not matching its own totals` : 'all matching their own totals');
   const issues = [...new Set(problems)].join('; ');
+  if (loaded) logImport({ category: 'retirals', source: 'Retirals', what: loaded, points, detail: `${loaded}${done.passbook || done.statement ? `, ${checked}` : ''}`, dataTo: /^d{4}-d{2}-d{2}$/.test(dataTo) ? dataTo : '' });
   A.toast([loaded && `Loaded ${loaded}${done.passbook || done.statement ? `, ${checked}` : ''}`, issues && `Couldn't use ${issues}`].filter(Boolean).join('. '));
 }
 

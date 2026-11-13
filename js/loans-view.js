@@ -7,6 +7,7 @@ import * as db from './db.js';
 import { CONFIG } from './config.js';
 import { shortAmounts, shortMoney } from './format.js';
 import { pdfLines } from './pdf-text.js';
+import { logImport } from './import-log.js';
 import { parseSchedule, loanSummary } from './loan.js';
 
 const HOME = '#/s/loans';
@@ -31,6 +32,7 @@ const loanById = id => A.S.loans.find(l => l.id === id);
 export const loansNav = () => [
   { id: 'home', name: 'Overview', icon: 'pie', href: HOME },
   ...loans().map(l => ({ id: l.id, name: l.name, icon: 'home', href: loanPath(l.id) })),
+  { id: 'imports', name: 'Data imports', icon: 'clock', href: '#/s/portfolio/imports', foot: true },
 ];
 
 export const loansRouteValid = r => r.page !== 'loan' || !!loanById(r.id);
@@ -233,6 +235,7 @@ async function loadFiles(files) {
   if (saved.length === 1 && A.S.route?.page !== 'loan') A.go(loanPath(saved[0].id));
   else A.refresh();
   const unchecked = saved.filter(l => !l.matches).length;
+  if (saved.length) logImport({ category: 'loans', source: saved.map(l => l.name).join(', '), what: A.plural(saved.length, 'loan schedule'), points: saved.reduce((n, l) => n + l.schedule.length, 0), detail: `${saved.map(l => `${l.schedule.length} EMIs`).join(', ')}, ${unchecked ? `${unchecked} not matching its own figures` : 'matching their own figures'}`, dataTo: saved.map(l => l.generated).filter(d => /^d{4}-d{2}-d{2}$/.test(d ?? '')).sort().at(-1) ?? '' });
   A.toast([saved.length && `Loaded ${A.plural(saved.length, 'loan schedule')}, ${unchecked ? `${unchecked} not matching its own figures` : 'matching its own figures'}`, problems.length && `Couldn't use ${problems.join('; ')}`].filter(Boolean).join('. '));
 }
 

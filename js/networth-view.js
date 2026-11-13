@@ -25,6 +25,7 @@ const monthName = s => A.fmt(new Date(`${s}T00:00:00`), { month: 'short', year: 
 export const networthNav = () => [
   { id: 'home', name: 'Overview', icon: 'pie', href: HOME },
   { id: 'milestones', name: 'Milestones', icon: 'chart', href: `${HOME}/milestones` },
+  { id: 'imports', name: 'Data imports', icon: 'clock', href: '#/s/portfolio/imports', foot: true },
 ];
 
 // Asset groups in a fixed order, so each keeps its colour whatever else is there.
