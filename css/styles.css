@@ -1010,6 +1010,13 @@ th.num .pf-th { justify-content: flex-end; }
 .nw-sheet .sw { margin-right: 8px; vertical-align: -1px; }
 .nw-group th, .nw-group td { font-weight: 600; }
 .nw-item th { padding-left: 26px; font-weight: 400; }
+.nw-sub th { padding-left: 46px; font-weight: 400; color: var(--muted); }
+.nw-sub th a { color: inherit; }
+.nw-total th, .nw-total td { font-weight: 700; border-top: 1px solid color-mix(in srgb, var(--text) 30%, var(--border)); }
+.nw-sheet .sw.nw-blank { background: transparent; }
+.nw-total + .nw-group th, .nw-total + .nw-group td { padding-top: 10px; }
+.nw-sheet th[scope="row"] a { display: inline; max-width: none; }
+.nw-sheet th[scope="row"] { white-space: nowrap; }
 .nw-portfolio { background: #2a78d6; }
 .nw-epf { background: #eb6834; }
 .nw-nps { background: #1baf7a; }

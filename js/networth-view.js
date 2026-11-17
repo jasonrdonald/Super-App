@@ -80,6 +80,27 @@ function balanceBars(w) {
   <div class="nw-legend">${w.groups.map(g => `<span><i class="sw ${g.cls}"></i>${g.label} ${pct(g.value / w.assets * 100)}</span>`).join('')}${w.owed ? '<span><i class="sw nw-owed"></i>Loans</span>' : ''}</div>`;
 }
 
+// The balance sheet as a tree: Portfolio and its brokers, Retirals and each kind (with
+// its accounts when there are several), then total assets; Loans and each loan, then
+// total loans. The net worth row follows in the table's footer.
+function sheetRows(w, row) {
+  const share = v => (w.assets ? v / w.assets * 100 : null);
+  const group = (label, value, cls, href) => `<tr class="nw-group"><th scope="row">${cls ? `<i class="sw ${cls}"></i>` : ''}${href ? `<a href="${href}">${A.esc(label)}</a>` : A.esc(label)}</th><td class="num">${value == null ? '' : money(value)}</td><td class="num">${value == null || value < 0 ? '' : pct(share(value))}</td></tr>`;
+  const total = (label, value, note) => `<tr class="nw-total"><th scope="row">${A.esc(label)}</th><td class="num">${money(value)}</td><td class="num">${note}</td></tr>`;
+  const portfolio = w.groups.find(g => g.id === 'portfolio');
+  const kinds = w.groups.filter(g => g.id !== 'portfolio');
+  const retirals = kinds.reduce((n, g) => n + g.value, 0);
+  const kindRow = g => `<tr class="nw-item"><th scope="row"><i class="sw ${g.cls}"></i><a href="#/s/retirals/t/${g.id.toLowerCase()}">${g.label}</a></th><td class="num">${money(g.value)}</td><td class="num">${pct(share(g.value))}</td></tr>
+    ${g.items.length > 1 ? g.items.map(x => row(x.name, x.value, x.href, share(x.value), 'nw-sub')).join('') : ''}`;
+  return [
+    portfolio ? `${group('Portfolio', portfolio.value, portfolio.cls, '#/s/portfolio')}${portfolio.items.map(x => row(x.name, x.value, x.href, share(x.value), 'nw-item')).join('')}` : '',
+    kinds.length ? `${group('Retirals', retirals, 'nw-blank', '#/s/retirals')}${kinds.map(kindRow).join('')}` : '',
+    total('Total assets', w.assets, '100%'),
+    w.loans.length ? `${group('Loans', null, 'nw-owed', '#/s/loans')}${w.loans.map(l => row(`${l.name}, still owed`, -l.owed, l.href, null, 'nw-item ret-out')).join('')}
+      ${total('Total loans', -w.owed, w.assets ? `${pct(w.owed / w.assets * 100)} of assets` : '')}` : '',
+  ].join('');
+}
+
 function overview() {
   const w = worth();
   if (!w.assets && !w.owed) {
@@ -114,12 +135,7 @@ function overview() {
       <section class="panel"><h2>Balance sheet</h2>
         <div class="holdings-wrap"><table class="holdings pf-summary nw-sheet">
           <thead><tr><th>Item</th><th class="num">Value</th><th class="num">Share of assets</th></tr></thead>
-          <tbody>
-            ${w.groups.map(g => `<tr class="nw-group"><th scope="row"><i class="sw ${g.cls}"></i>${g.label}</th><td class="num">${money(g.value)}</td><td class="num">${pct(g.value / w.assets * 100)}</td></tr>
-              ${g.items.length > 1 || g.id === 'portfolio' ? g.items.map(x => row(x.name, x.value, x.href, x.value / w.assets * 100, 'nw-item')).join('') : ''}`).join('')}
-            <tr class="nw-group"><th scope="row">You own</th><td class="num">${money(w.assets)}</td><td class="num">100%</td></tr>
-            ${w.loans.map(l => row(`${l.name}, still owed`, -l.owed, l.href, null, 'nw-item ret-out')).join('')}
-          </tbody>
+          <tbody>${sheetRows(w, row)}</tbody>
           <tfoot><tr><th scope="row">Net worth</th><td class="num">${money(w.net)}</td><td></td></tr></tfoot>
         </table></div>
         <p class="muted small chart-note">Portfolio is today's market value, with US holdings at today's dollar rate. EPF is its balance, leaving out the pension (EPS). NPS is its latest statement's value. PPF is its balance, without this year's interest until it's credited on 31 March. LIC counts only its minimum surrender value, the certain part if surrendered today. Loans are what's owed after the EMIs paid so far.</p>
