@@ -235,7 +235,7 @@ async function loadFiles(files) {
   if (saved.length === 1 && A.S.route?.page !== 'loan') A.go(loanPath(saved[0].id));
   else A.refresh();
   const unchecked = saved.filter(l => !l.matches).length;
-  if (saved.length) logImport({ category: 'loans', source: saved.map(l => l.name).join(', '), what: A.plural(saved.length, 'loan schedule'), points: saved.reduce((n, l) => n + l.schedule.length, 0), detail: `${saved.map(l => `${l.schedule.length} EMIs`).join(', ')}, ${unchecked ? `${unchecked} not matching its own figures` : 'matching their own figures'}`, dataTo: saved.map(l => l.generated).filter(d => /^d{4}-d{2}-d{2}$/.test(d ?? '')).sort().at(-1) ?? '' });
+  if (saved.length) logImport({ category: 'loans', source: saved.map(l => l.name).join(', '), what: A.plural(saved.length, 'loan schedule'), points: saved.reduce((n, l) => n + l.schedule.length, 0), detail: `${saved.map(l => `${l.schedule.length} EMIs`).join(', ')}, ${unchecked ? `${unchecked} not matching its own figures` : 'matching their own figures'}`, dataTo: saved.map(l => l.generated).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d ?? '')).sort().at(-1) ?? '' });
   A.toast([saved.length && `Loaded ${A.plural(saved.length, 'loan schedule')}, ${unchecked ? `${unchecked} not matching its own figures` : 'matching its own figures'}`, problems.length && `Couldn't use ${problems.join('; ')}`].filter(Boolean).join('. '));
 }
 

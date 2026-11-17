@@ -33,6 +33,7 @@ const GROUPS = [
   { id: 'portfolio', label: 'Portfolio', cls: 'nw-portfolio' },
   { id: 'EPF', label: 'EPF', cls: 'nw-epf' },
   { id: 'NPS', label: 'NPS', cls: 'nw-nps' },
+  { id: 'PPF', label: 'PPF', cls: 'nw-ppf' },
   { id: 'LIC', label: 'LIC', cls: 'nw-lic' },
 ];
 
@@ -121,7 +122,7 @@ function overview() {
           </tbody>
           <tfoot><tr><th scope="row">Net worth</th><td class="num">${money(w.net)}</td><td></td></tr></tfoot>
         </table></div>
-        <p class="muted small chart-note">Portfolio is today's market value, with US holdings at today's dollar rate. EPF is its balance, leaving out the pension (EPS). NPS is its latest statement's value. LIC counts only its minimum surrender value, the certain part if surrendered today. Loans are what's owed after the EMIs paid so far.</p>
+        <p class="muted small chart-note">Portfolio is today's market value, with US holdings at today's dollar rate. EPF is its balance, leaving out the pension (EPS). NPS is its latest statement's value. PPF is its balance, without this year's interest until it's credited on 31 March. LIC counts only its minimum surrender value, the certain part if surrendered today. Loans are what's owed after the EMIs paid so far.</p>
       </section>
     </div></div>`;
 }
@@ -146,7 +147,7 @@ function milestones() {
     empty: `<div class="empty">${icon('chart')}<p>Net worth needs to be above zero to grow towards a milestone. Load your brokers and retirals first.</p></div>`,
     stats: `<div class="stats five">
       ${stat('Net worth today', money(w.net), `${money(w.assets)} owned − ${money(w.owed)} owed`)}
-      ${stat('Blended return', blended != null ? `${blended}%` : '–', 'Portfolio XIRR, EPF and NPS rates, weighted by value')}
+      ${stat('Blended return', blended != null ? `${blended}%` : '–', 'Portfolio XIRR, EPF, NPS and PPF rates, weighted by value')}
       ${stat('Going in a month', money(monthly), `Portfolio ${money(pf.monthly)} + EPF ${money(retiralMonthly)}`)}
       ${stat('Loans owed', money(w.owed), w.loans.length ? `Repaid by ${monthName(w.loans.map(l => l.last).sort().at(-1))}` : 'None')}
     </div>`,

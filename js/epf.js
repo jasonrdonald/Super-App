@@ -1,5 +1,6 @@
 import { cleanPolicy } from './lic.js';
 import { cleanNpsAccount, cleanNpsStatement, cleanNpsEntry } from './nps.js';
+import { cleanPpfAccount, cleanPpfStatement, cleanPpfEntry } from './ppf.js';
 
 // EPF passbooks: reading a year's statement out of the PDF's text, and the sums
 // behind the Retirals pages. Only the employer's name, the last four digits of
@@ -172,16 +173,18 @@ const finite = v => (Number.isFinite(v) ? v : 0);
 const trio = v => (Array.isArray(v) && v.length === 3 ? v.map(finite) : [0, 0, 0]);
 const isDate = v => typeof v === 'string' && /^\d{4}-\d\d-\d\d$/.test(v);
 
-// An account is an EPF account, an LIC policy or an NPS account, told apart by kind.
+// An account is an EPF account, an LIC policy, an NPS account or a PPF account, told apart by kind.
 export function cleanRetiralAccount(x) {
   if (!x?.id) return null;
   if (x.kind === 'lic') return cleanPolicy(x);
   if (x.kind === 'nps') return cleanNpsAccount(x);
+  if (x.kind === 'ppf') return cleanPpfAccount(x);
   return { id: text(x.id, 60), kind: 'epf', name: text(x.name, 80) || 'EPF', employer: text(x.employer, 120), memberTail: text(x.memberTail, 4).replace(/\D/g, ''), createdAt: finite(x.createdAt), updatedAt: finite(x.updatedAt) };
 }
 
 export function cleanRetiralStatement(x) {
   if (x?.kind === 'nps') return cleanNpsStatement(x);
+  if (x?.kind === 'ppf') return cleanPpfStatement(x);
   if (!x?.id || !x.accountId || !Number.isInteger(x.fy)) return null;
   return {
     id: text(x.id, 80), accountId: text(x.accountId, 60), fy: x.fy,
@@ -193,6 +196,7 @@ export function cleanRetiralStatement(x) {
 
 export function cleanRetiralEntry(x) {
   if (String(x?.kind).startsWith('nps-')) return cleanNpsEntry(x);
+  if (String(x?.kind).startsWith('ppf-')) return cleanPpfEntry(x);
   if (!x?.id || !x.accountId || !isDate(x.date)) return null;
   const kinds = ['contribution', 'transfer', 'withdrawal', 'credit', 'premium'];
   if (x.kind === 'premium') {

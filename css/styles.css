@@ -520,6 +520,7 @@ th.num .pf-th { justify-content: flex-end; }
 .ret-due td { color: var(--muted); }
 .ret-head { margin: 18px 0 8px; font-size: 1.05rem; }
 .ret-head:first-of-type { margin-top: 4px; }
+.ret-insights { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: .9rem; }
 .ret-steps { display: grid; gap: 12px; margin: 0; padding-left: 20px; }
 .ret-steps li { display: grid; gap: 2px; }
 .ret-steps span { font-size: .84rem; color: var(--muted); }
@@ -998,17 +999,20 @@ th.num .pf-th { justify-content: flex-end; }
 .nw-epf { background: #eb6834; }
 .nw-nps { background: #1baf7a; }
 .nw-lic { background: #6250d6; }
+.nw-ppf { background: #c4377f; }
 .nw-owed { background: color-mix(in srgb, var(--text) 38%, var(--surface)); }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .nw-portfolio { background: #3987e5; }
   :root:not([data-theme="light"]) .nw-epf { background: #d95926; }
   :root:not([data-theme="light"]) .nw-nps { background: #199e70; }
   :root:not([data-theme="light"]) .nw-lic { background: #9085e9; }
+  :root:not([data-theme="light"]) .nw-ppf { background: #e05a9c; }
 }
 :root[data-theme="dark"] .nw-portfolio { background: #3987e5; }
 :root[data-theme="dark"] .nw-epf { background: #d95926; }
 :root[data-theme="dark"] .nw-nps { background: #199e70; }
 :root[data-theme="dark"] .nw-lic { background: #9085e9; }
+:root[data-theme="dark"] .nw-ppf { background: #e05a9c; }
 
 /* Change over a period, on Portfolio's summaries */
 .pf-period-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: -4px 0 12px; }

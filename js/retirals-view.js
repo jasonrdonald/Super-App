@@ -1,5 +1,6 @@
 // The Retirals section: EPF accounts built from the passbook PDFs you load, LIC
-// policies from their details and premium receipts, and NPS from its statements.
+// policies from their details and premium receipts, NPS from its statements and
+// PPF from the bank's account statement.
 // Amounts follow Portfolio's privacy switch and the app's Short amounts setting.
 
 import { icon } from './icons.js';
@@ -11,6 +12,9 @@ import { logImport } from './import-log.js';
 import { parsePassbook, accountSummary } from './epf.js';
 import { parseReceipts, policySummary, MODES } from './lic.js';
 import { parseStatement as parseNpsStatement, npsSummary, schemeName, transactionKind } from './nps.js';
+import { parsePpfStatement, ppfSummary, PPF_LIMIT, PPF_MINIMUM } from './ppf.js';
+import { readWorkbook, readLegacyWorkbook } from './xlsx.js';
+import { xirr } from './portfolio.js';
 
 const HOME = '#/s/retirals';
 const MASK = '••••••';
@@ -29,7 +33,15 @@ const accountPath = id => `${HOME}/a/${id}`;
 const accounts = () => [...A.S.retiralAccounts].sort((a, b) => a.createdAt - b.createdAt);
 const isPolicy = a => a.kind === 'lic';
 const isNps = a => a.kind === 'nps';
-const epfAccounts = () => accounts().filter(a => !isPolicy(a) && !isNps(a));
+const isPpf = a => a.kind === 'ppf';
+const epfAccounts = () => accounts().filter(a => !isPolicy(a) && !isNps(a) && !isPpf(a));
+const ppfAccounts = () => accounts().filter(isPpf);
+// The balance holds as of the latest statement's date, which can be after its last transaction.
+const ppfOf = a => {
+  const s = ppfSummary(a, A.S.retiralEntries.filter(e => e.accountId === a.id && e.kind.startsWith('ppf-')).map(e => ({ ...e, kind: e.kind.slice(4) })));
+  const latest = A.S.retiralStatements.filter(x => x.accountId === a.id && x.kind === 'ppf').reduce((d, x) => (x.asOf > d ? x.asOf : d), '');
+  return s && latest > s.asOf ? { ...s, asOf: latest } : s;
+};
 const npsAccounts = () => accounts().filter(isNps);
 const npsOf = a => npsSummary(A.S.retiralStatements.filter(s => s.accountId === a.id), A.S.retiralEntries.filter(e => e.accountId === a.id));
 const policies = () => accounts().filter(isPolicy);
@@ -39,16 +51,16 @@ const summaryOf = id => accountSummary(A.S.retiralStatements.filter(s => s.accou
 
 export const retiralsNav = () => [
   { id: 'home', name: 'Overview', icon: 'pie', href: HOME },
-  ...accounts().map(a => ({ id: a.id, name: a.name, icon: isPolicy(a) ? 'shield' : isNps(a) ? 'chart' : 'briefcase', href: accountPath(a.id) })),
+  ...accounts().map(a => ({ id: a.id, name: a.name, icon: isPolicy(a) ? 'shield' : isNps(a) ? 'chart' : isPpf(a) ? 'card' : 'briefcase', href: accountPath(a.id) })),
   { id: 'imports', name: 'Data imports', icon: 'clock', href: '#/s/portfolio/imports', foot: true },
 ];
 
 export const retiralsRouteValid = r => !['account', 'lic-edit'].includes(r.page) || !!accountById(r.id);
 
-// EPF and NPS together for the home screen's tile, or a count of policies when there are neither.
+// EPF, NPS and PPF together for the home screen's tile, or a count of policies when there are neither.
 // LIC isn't added in, as a policy's worth depends on when it's claimed.
 export function retiralsTileText() {
-  const total = epfAccounts().reduce((n, a) => n + (summaryOf(a.id)?.balance ?? 0), 0) + npsAccounts().reduce((n, a) => n + (npsOf(a)?.latest.value ?? 0), 0);
+  const total = epfAccounts().reduce((n, a) => n + (summaryOf(a.id)?.balance ?? 0), 0) + npsAccounts().reduce((n, a) => n + (npsOf(a)?.latest.value ?? 0), 0) + ppfAccounts().reduce((n, a) => n + (ppfOf(a)?.balance ?? 0), 0);
   if (total) return money(total);
   return policies().length ? A.plural(policies().length, 'policy').replace('policys', 'policies') : '';
 }
@@ -65,6 +77,11 @@ export function retiralsParts() {
     ...npsAccounts().map(a => {
       const s = npsOf(a);
       return s && { id: a.id, kind: 'NPS', name: a.name, value: s.latest.value, href: accountPath(a.id), monthly: 0, rate: s.latest.xirr };
+    }),
+    // PPF counts its balance; the monthly addition is the average yearly deposit of the last three years.
+    ...ppfAccounts().map(a => {
+      const s = ppfOf(a);
+      return s && { id: a.id, kind: 'PPF', name: a.name, value: s.balance, href: accountPath(a.id), monthly: s.yearly / 12, rate: s.rate };
     }),
     ...policies().map(a => ({ id: a.id, kind: 'LIC', name: a.name, value: policyOf(a).surrenderFloor ?? 0, href: accountPath(a.id), monthly: 0, rate: null })),
   ].filter(Boolean);
@@ -83,7 +100,7 @@ function hero(title, sub, up, extra = '') {
 
 const stat = (label, value, note = '') => `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value}</span><span class="stat-note">${note}</span></div>`;
 
-const loadButton = (label = 'Load files') => `<label class="btn sm primary">${icon('upload')}<span>${label}</span><input id="ret-files" type="file" multiple accept=".pdf,.csv,application/pdf,text/csv" hidden></label>`;
+const loadButton = (label = 'Load files') => `<label class="btn sm primary">${icon('upload')}<span>${label}</span><input id="ret-files" type="file" multiple accept=".pdf,.csv,.xlsx,.xls,application/pdf,text/csv" hidden></label>`;
 
 // The monthly amounts going in, from the latest contribution.
 function lastContribution(id) {
@@ -160,22 +177,120 @@ function npsBlock(list) {
     </a>`).join('')}</div>`;
 }
 
+const pct = v => (v == null ? '–' : `${v.toFixed(2)}%`);
+const yearsLeft = to => {
+  const now = new Date(), end = new Date(`${to}T00:00:00`);
+  const months = (end.getFullYear() - now.getFullYear()) * 12 + end.getMonth() - now.getMonth();
+  return months <= 0 ? 'now' : `in ${[Math.floor(months / 12) && A.plural(Math.floor(months / 12), 'year'), months % 12 && A.plural(months % 12, 'month')].filter(Boolean).join(' ')}`;
+};
+
+function ppfBlock(list) {
+  const sums = list.map(a => ({ a, s: ppfOf(a) })).filter(x => x.s);
+  if (!sums.length) return '';
+  const add = key => sums.reduce((n, x) => n + (x.s[key] ?? 0), 0);
+  const one = sums.length === 1 ? sums[0].s : null;
+  return `<h2 class="ret-head">PPF</h2>
+    <div class="stats five">
+      ${stat('PPF balance', money(add('balance')), one ? `As of ${day(one.asOf)}` : '')}
+      ${stat('Interest building this year', money(add('accrued')), one?.rate ? `About, at ${one.rate}%, credited 31 March` : 'Credited 31 March')}
+      ${stat('You put in', money(add('deposits')), `Interest earned ${money(add('interest'))}`)}
+      ${stat('Return', one ? pct(xirr(one.flows)) : '–', 'XIRR on your deposits, tax-free')}
+      ${stat('Room this year', money(add('room')), `Of ${money(PPF_LIMIT * sums.length)}, by 31 March`)}
+    </div>
+    <div class="rows pf-accounts">${sums.map(({ a, s }) => `<a class="sub pf-account" href="${accountPath(a.id)}">
+      <span class="sub-main"><span class="sub-text"><span class="card-title">${A.esc(a.name)}</span>
+      <span class="card-meta">${a.accountTail ? `Account ending ${A.esc(a.accountTail)} · ` : ''}${s.extendedTo ? `extended to ${day(s.extendedTo)}` : `matures ${day(s.maturity)}`}</span></span></span>
+      <span class="pay-side"><span class="pay-amount">${money(s.balance)}</span><span class="pf-delta">+ ${money(s.accrued)} building</span></span>
+    </a>`).join('')}</div>`;
+}
+
+function ppfView(a) {
+  const s = ppfOf(a);
+  const statement = A.S.retiralStatements.filter(x => x.accountId === a.id && x.kind === 'ppf').sort((p, q) => p.asOf.localeCompare(q.asOf)).at(-1);
+  const tick = ok => (ok ? `<span class="up">${icon('check')} Matches</span>` : '<span class="down">Differs</span>');
+  const ret = s ? xirr(s.flows) : null;
+  const ends = s?.extendedTo ?? s?.maturity;
+  const insights = s ? [
+    s.extendedTo
+      ? `Matured on ${day(s.maturity)} and now runs in 5-year blocks; this one ends ${day(s.extendedTo)}, ${yearsLeft(s.extendedTo)}.`
+      : `Matures on ${day(s.maturity)}, ${yearsLeft(s.maturity)}, 15 full years after the year it opened. You can then close it, or extend it in 5-year blocks with or without deposits.`,
+    s.belowMinimum ? `Put in at least ${money(PPF_MINIMUM)} by 31 March to keep it active; nothing has gone in this year yet.` : `${money(s.thisYear)} has gone in this year, leaving ${money(s.room)} you can still add by 31 March. Deposits by the 5th of a month earn interest for that month.`,
+    s.canWithdraw && s.withdrawLimit ? `A partial withdrawal of up to ${money(s.withdrawLimit)} is allowed this year: half the lower of the balances at the end of the fourth year back and of last year.` : '',
+    s.projected != null ? `Keeping up ${money(s.yearly)} a year at ${s.rate}%, it would be about ${money(s.projected)} on ${day(ends)}. Putting in the full ${money(PPF_LIMIT)} each year would make it about ${money(s.projectedMax)}.` : '',
+  ].filter(Boolean) : [];
+  A.view.innerHTML = `${hero(a.name, ['Public Provident Fund', a.accountTail && `account ending ${a.accountTail}`, a.bank].filter(Boolean).join(' · '), HOME, `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Account options">${icon('more')}</button>`)}
+    <div class="scroll"><div class="pay-page pf-page">
+      ${s ? `<div class="stats five">
+        ${stat('Balance', money(s.balance), `As of ${day(s.asOf)}`)}
+        ${stat('Interest building this year', money(s.accrued), s.rate ? `About, at ${s.rate}%, credited 31 March` : 'Credited 31 March')}
+        ${stat('You put in', money(s.deposits), A.plural(s.entries.filter(e => e.kind === 'deposit').length, 'deposit'))}
+        ${stat('Interest earned', money(s.interest), s.balance ? `${(s.interest / s.balance * 100).toFixed(1)}% of the balance` : '')}
+        ${stat('Return', pct(ret), 'XIRR on your deposits, tax-free')}
+        ${stat('This year', money(s.thisYear), `${money(s.room)} of ${money(PPF_LIMIT)} left to put in`)}
+      </div>` : ''}
+      <div class="status">${icon('clock')}<span>From the statement of ${statement ? day(statement.asOf) : '–'}${statement ? `, ${statement.matches ? 'its balances and totals all matching' : 'which doesn\'t match its own totals'}` : ''}. Opened ${a.opened ? day(a.opened) : '–'}.</span></div>
+      <div class="btn-row">${loadButton('Load a newer statement')}</div>
+      ${insights.length ? `<section class="panel"><h2>Insights</h2><ul class="ret-insights">${insights.map(t => `<li>${t}</li>`).join('')}</ul></section>` : ''}
+      <section class="panel"><h2>Year by year</h2>
+        <p class="muted small chart-note">Interest is credited each 31 March, on the lowest balance between the 5th and the end of each month. Effective rate is the year's interest over that average balance, which comes to the rate the government declared.</p>
+        <div class="holdings-wrap"><table class="holdings pf-summary">
+          <thead><tr><th>Year</th>${['Opening', 'Put in', 'Interest', 'Withdrawn', 'Closing', 'Effective rate'].map(h => `<th class="num">${h}</th>`).join('')}</tr></thead>
+          <tbody>${[...(s?.years ?? [])].reverse().map(y => `<tr><th scope="row">${fyName(y.fy)}</th><td class="num">${money(y.opening)}</td><td class="num">${money(y.deposits)}</td>
+            <td class="num">${y.credited ? money(y.interest) : y.fy === s.years.at(-1).fy ? `<span class="muted">About ${money(s.accrued)} so far</span>` : money(y.interest)}</td><td class="num">${money(y.withdrawn)}</td><td class="num">${money(y.closing)}</td><td class="num">${pct(y.rate)}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </section>
+      <section class="panel"><details class="pf-details"><summary>Transactions · ${s?.entries.length ?? 0}</summary>
+        <div class="holdings-wrap"><table class="holdings lots">
+          <thead><tr><th>Date</th><th>What</th><th class="num">Amount</th><th class="num">Balance</th></tr></thead>
+          <tbody>${[...(s?.entries ?? [])].reverse().map(e => `<tr class="${e.kind === 'withdrawal' ? 'ret-out' : ''}"><td>${day(e.date)}</td><td>${{ deposit: 'Deposit', interest: 'Interest', withdrawal: 'Withdrawal' }[e.kind]}</td>
+            <td class="num">${money(e.kind === 'withdrawal' ? -e.amount : e.amount)}</td><td class="num">${money(e.balance)}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </details></section>
+      <p class="muted small chart-note">Only the bank, the account number's last four digits, the rate, the dates and the amounts are kept from the statement, never your name, address, email, branch or the savings account deposits come from.</p>
+    </div></div>`;
+  bindFiles();
+}
+
+// One PPF statement. Each transaction is kept by its date, kind, amount and balance,
+// so a newer statement covering the same years adds only what's new.
+async function savePpf(p) {
+  const now = Date.now();
+  let account = A.S.retiralAccounts.find(a => a.kind === 'ppf' && a.accountTail === p.accountTail);
+  const bankShort = /State Bank of India/i.test(p.bank) ? 'SBI' : p.bank.replace(/\s*Bank$/i, '');
+  if (!account) {
+    account = { id: A.uid(), kind: 'ppf', name: `PPF${bankShort ? ` · ${bankShort}` : ''}`, bank: p.bank, accountTail: p.accountTail, rate: p.rate, opened: p.opened, createdAt: now, updatedAt: now };
+    A.S.retiralAccounts.push(account);
+  } else {
+    Object.assign(account, { rate: p.rate ?? account.rate, opened: p.opened ?? account.opened, bank: p.bank || account.bank, updatedAt: now });
+  }
+  await db.put('retiralAccounts', account);
+  const statement = { id: `${account.id}:ppf:${p.asOf}`, accountId: account.id, kind: 'ppf', asOf: p.asOf, from: p.from, to: p.to, closing: p.closing, rate: p.rate, count: p.entries.length, matches: p.matches, updatedAt: now };
+  const entries = p.entries.map(e => ({ id: `${account.id}:ppf:${e.date}:${e.kind}:${e.amount}:${e.balance}`, accountId: account.id, kind: `ppf-${e.kind}`, date: e.date, amount: e.amount, balance: e.balance, updatedAt: now }));
+  const ids = new Set(entries.map(e => e.id));
+  A.S.retiralEntries = [...A.S.retiralEntries.filter(e => !ids.has(e.id)), ...entries];
+  A.S.retiralStatements = [...A.S.retiralStatements.filter(x => x.id !== statement.id), statement];
+  await db.putMany('retiralEntries', entries);
+  await db.put('retiralStatements', statement);
+  return statement;
+}
+
 function homeView() {
-  const epf = epfAccounts(), lic = policies(), nps = npsAccounts();
-  if (!epf.length && !lic.length && !nps.length) {
+  const epf = epfAccounts(), lic = policies(), nps = npsAccounts(), ppf = ppfAccounts();
+  if (!epf.length && !lic.length && !nps.length && !ppf.length) {
     A.view.innerHTML = `${hero('Retirals', 'EPF, NPS, LIC and other retirement savings', '#/')}
-      <div class="scroll"><div class="empty">${icon('shield')}<p>Load your EPF passbook PDFs, NPS transaction statement CSVs or LIC premium receipts, in any mix. Add an LIC policy first for its receipts.</p>
+      <div class="scroll"><div class="empty">${icon('shield')}<p>Load your EPF passbook PDFs, NPS transaction statement CSVs, PPF account statements or LIC premium receipts, in any mix. Add an LIC policy first for its receipts.</p>
       <div class="pf-start"><div class="btn-row">${loadButton()}${addPolicyButton}</div></div>
-      <p class="muted small">Only the employer's name, the last four digits of member IDs, PRANs and policy numbers, and the amounts are kept, never your name, date of birth, UAN, PAN, bank details, address or nominee.</p></div></div>`;
+      <p class="muted small">Only the employer's name, the last four digits of member IDs, PRANs, PPF accounts and policy numbers, and the amounts are kept, never your name, date of birth, UAN, PAN, bank details, address or nominee.</p></div></div>`;
     return bindFiles();
   }
-  const counts = [epf.length && A.plural(epf.length, 'EPF account'), nps.length && A.plural(nps.length, 'NPS account'), lic.length && (lic.length === 1 ? '1 LIC policy' : `${lic.length} LIC policies`)];
+  const counts = [epf.length && A.plural(epf.length, 'EPF account'), nps.length && A.plural(nps.length, 'NPS account'), ppf.length && A.plural(ppf.length, 'PPF account'), lic.length && (lic.length === 1 ? '1 LIC policy' : `${lic.length} LIC policies`)];
   A.view.innerHTML = `${hero('Retirals', counts.filter(Boolean).join(' · '), '#/')}
     <div class="scroll"><div class="pay-page pf-page">
       <div class="btn-row">${loadButton()}${addPolicyButton}</div>
-      <p class="muted small chart-note">Load files takes EPF passbook PDFs, NPS statement CSVs and LIC premium receipts, in any mix.</p>
+      <p class="muted small chart-note">Load files takes EPF passbook PDFs, NPS statement CSVs, PPF account statements (.xlsx or .xls) and LIC premium receipts, in any mix.</p>
       ${epfBlock(epf)}
       ${npsBlock(nps)}
+      ${ppfBlock(ppf)}
       ${policyBlock(lic)}
     </div></div>`;
   bindFiles();
@@ -394,6 +509,7 @@ function accountView(r) {
   const a = accountById(r.id);
   if (isPolicy(a)) return policyView(a);
   if (isNps(a)) return npsView(a);
+  if (isPpf(a)) return ppfView(a);
   const s = summaryOf(a.id);
   const statements = s?.years ?? [];
   const tick = ok => (ok ? `<span class="up">${icon('check')} Matches</span>` : '<span class="down">Differs</span>');
@@ -465,7 +581,7 @@ async function savePassbook(p) {
 // One button takes any mix of files and works out each one: an NPS statement CSV,
 // an EPF passbook PDF or an LIC premium receipt PDF.
 async function loadFiles(files) {
-  const done = { passbook: 0, statement: 0, receipt: 0 };
+  const done = { passbook: 0, statement: 0, receipt: 0, ppf: 0 };
   let unchecked = 0, points = 0, dataTo = '';
   const problems = [];
   // Counts each file's rows and its latest date for the import timeline.
@@ -477,6 +593,15 @@ async function loadFiles(files) {
         const statement = await saveNps(parsed);
         seen(parsed.transactions);
         done.statement++;
+        if (!statement.matches) unchecked++;
+        continue;
+      }
+      if (/.xlsx?$/i.test(file.name)) {
+        const sheets = /.xlsx$/i.test(file.name) ? await readWorkbook(file) : readLegacyWorkbook(await file.arrayBuffer());
+        const parsed = parsePpfStatement(sheets);
+        const statement = await savePpf(parsed);
+        seen(parsed.entries);
+        done.ppf++;
         if (!statement.matches) unchecked++;
         continue;
       }
@@ -495,16 +620,16 @@ async function loadFiles(files) {
       done.passbook++;
       if (!statement.matches) unchecked++;
     } catch (e) {
-      problems.push(`${file.name}: ${e.message.replace("This isn't an EPF passbook", 'not an EPF passbook, LIC receipt or NPS statement')}`);
+      problems.push(`${file.name}: ${e.message.replace("This isn't an EPF passbook", 'not an EPF passbook, LIC receipt, NPS or PPF statement')}`);
     }
   }
   A.markDirty();
   A.refresh();
-  const loaded = [done.passbook && A.plural(done.passbook, 'EPF passbook'), done.statement && A.plural(done.statement, 'NPS statement'), done.receipt && A.plural(done.receipt, 'LIC receipt')].filter(Boolean).join(', ');
+  const loaded = [done.passbook && A.plural(done.passbook, 'EPF passbook'), done.statement && A.plural(done.statement, 'NPS statement'), done.ppf && A.plural(done.ppf, 'PPF statement'), done.receipt && A.plural(done.receipt, 'LIC receipt')].filter(Boolean).join(', ');
   const checked = loaded && (unchecked ? `${unchecked} not matching its own totals` : 'all matching their own totals');
   const issues = [...new Set(problems)].join('; ');
-  if (loaded) logImport({ category: 'retirals', source: 'Retirals', what: loaded, points, detail: `${loaded}${done.passbook || done.statement ? `, ${checked}` : ''}`, dataTo: /^d{4}-d{2}-d{2}$/.test(dataTo) ? dataTo : '' });
-  A.toast([loaded && `Loaded ${loaded}${done.passbook || done.statement ? `, ${checked}` : ''}`, issues && `Couldn't use ${issues}`].filter(Boolean).join('. '));
+  if (loaded) logImport({ category: 'retirals', source: 'Retirals', what: loaded, points, detail: `${loaded}${done.passbook || done.statement || done.ppf ? `, ${checked}` : ''}`, dataTo: /^\d{4}-\d{2}-\d{2}$/.test(dataTo) ? dataTo : '' });
+  A.toast([loaded && `Loaded ${loaded}${done.passbook || done.statement || done.ppf ? `, ${checked}` : ''}`, issues && `Couldn't use ${issues}`].filter(Boolean).join('. '));
 }
 
 function bindFiles() {
@@ -542,7 +667,7 @@ export async function retiralsAction(b) {
         A.markDirty();
         return A.refresh();
       }
-      if (pick !== 1 || !(await A.confirmDlg(`Remove “${a.name}”?`, isPolicy(a) ? 'Its details and receipts are removed from this device.' : isNps(a) ? 'Its statements are removed from this device. You can load the CSVs again later.' : 'Its passbook entries are removed from this device. You can load the PDFs again later.', 'Remove'))) return undefined;
+      if (pick !== 1 || !(await A.confirmDlg(`Remove “${a.name}”?`, isPolicy(a) ? 'Its details and receipts are removed from this device.' : isPpf(a) ? 'Its statement entries are removed from this device. You can load the statement again later.' : isNps(a) ? 'Its statements are removed from this device. You can load the CSVs again later.' : 'Its passbook entries are removed from this device. You can load the PDFs again later.', 'Remove'))) return undefined;
       for (const e of A.S.retiralEntries.filter(x => x.accountId === id)) await db.del('retiralEntries', e.id);
       for (const s of A.S.retiralStatements.filter(x => x.accountId === id)) await db.del('retiralStatements', s.id);
       await db.del('retiralAccounts', id);
