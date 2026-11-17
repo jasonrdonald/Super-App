@@ -9,6 +9,7 @@ import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, un
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { createMilestones } from './milestones.js';
 import { reportHtml, printReport } from './portfolio-report.js';
+import { workbookBlob } from './xlsx-write.js';
 import { logImport, IMPORT_CATEGORIES, daysSince } from './import-log.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS, BACKUP_FILES, BACKUP_CONTENTS, BACKUP_LEAVES_OUT, BACKUP_NEEDS_NOTHING } from './disclosures.js';
@@ -939,6 +940,92 @@ async function exportPdf(id) {
   A.toast('Choose Save as PDF in the print window');
 }
 
+/* ---------- Excel export ---------- */
+
+// The holdings as a workbook: a summary by broker, asset types, every holding with its
+// broker in one list for filtering and pivots, the consolidated view one row a ticker,
+// and a sheet for each broker in its own currency. Rupee columns convert US brokers
+// at today's rate.
+function excelSheets(list) {
+  const data = reportData(list);
+  const rate = fxRate();
+  const at = A.ls.get('pfQuotedAt', 0);
+  const notes = [`${data.generated}. ${at ? `Prices as of ${A.fmt(new Date(at), { dateStyle: 'medium', timeStyle: 'short' })}, delayed.` : 'Prices not loaded.'}${rate && list.some(isUsd) ? ` US$1 = ₹${rate.toFixed(2)}.` : ''}`, 'Made by SuperApp on this device. Not investment advice.'];
+  const t = { text: 'text', money: 'money', money2: 'money2', pct: 'pct', qty: 'qty' };
+  const col = (header, type = t.text, width) => ({ header, type, width });
+  const toInr = (b, v) => (v == null ? null : b.usd ? (rate ? v * rate : null) : v);
+
+  const summary = {
+    name: 'By broker', title: `${data.title}: holdings by broker`, notes,
+    columns: [col('Broker account', t.text, 22), col('Broker', t.text, 18), col('Account type', t.text, 14), col('Currency', t.text, 9), col('Holdings', t.qty, 10),
+      col('Invested (₹)', t.money), col('Market value (₹)', t.money), col('Unrealized gain (₹)', t.money), col('Unrealized gain %', t.pct), col('XIRR, held %', t.pct),
+      col('Share of portfolio %', t.pct), col('Realized gain (₹)', t.money), col('Dividends (₹)', t.money), col('XIRR, all time %', t.pct)],
+    rows: data.brokers.map(b => [b.name, b.broker, b.kind, b.currency, b.heldCount, b.rupeeSummary.cost, b.rupeeSummary.value, b.rupeeSummary.gain, b.rupeeSummary.gainPct, b.rupeeSummary.xirr,
+      b.share, toInr(b, b.summary.realized), toInr(b, b.summary.dividends), b.summary.xirrAll]),
+    total: ['Total', '', '', '', data.holdings, data.typesTotal.cost, data.typesTotal.value, data.typesTotal.gain, data.typesTotal.gainPct, data.typesTotal.xirr, 100, data.total.realized, data.total.dividends, data.total.xirr],
+  };
+
+  const types = {
+    name: 'By asset type', title: `${data.title}: holdings by asset type`, notes,
+    columns: [col('Asset type', t.text, 16), col('Holdings', t.qty, 10), col('Invested (₹)', t.money), col('Market value (₹)', t.money), col('Unrealized gain (₹)', t.money), col('Unrealized gain %', t.pct), col('XIRR %', t.pct), col('Share %', t.pct)],
+    rows: data.types.map(g => [g.label, g.summary.count, g.summary.cost, g.summary.value, g.summary.gain, g.summary.gainPct, g.summary.xirr, g.share]),
+    total: ['Total', data.typesTotal.count, data.typesTotal.cost, data.typesTotal.value, data.typesTotal.gain, data.typesTotal.gainPct, data.typesTotal.xirr, 100],
+  };
+
+  // Every holding, one row each, with its broker: per-share figures in the broker's currency, totals in rupees.
+  const total = data.typesTotal.value;
+  const allRows = data.brokers.flatMap(b => b.types.flatMap(g => g.holdings.map(h => [
+    b.name, typeLabel(g.label, b.usd), h.symbol, h.name && h.name !== h.symbol ? h.name : '', h.qty, b.currency, h.avg, h.price,
+    toInr(b, h.cost), toInr(b, h.value), toInr(b, h.gain), h.gainPct, h.xirr, total && toInr(b, h.value) != null ? toInr(b, h.value) / total * 100 : null,
+  ])));
+  const all = {
+    name: 'All holdings', title: `${data.title}: every holding by broker`, notes: [...notes.slice(0, 1), 'Avg cost and price are in each broker\'s currency; the other amounts are in rupees.'],
+    columns: [col('Broker account', t.text, 20), col('Asset type', t.text, 13), col('Symbol', t.text, 14), col('Name', t.text, 34), col('Quantity', t.qty, 12), col('Currency', t.text, 9),
+      col('Avg cost', t.money2, 12), col('Price', t.money2, 12), col('Invested (₹)', t.money), col('Market value (₹)', t.money), col('Unrealized gain (₹)', t.money), col('Unrealized gain %', t.pct), col('XIRR %', t.pct), col('Weight in portfolio %', t.pct)],
+    rows: allRows,
+    total: ['Total', '', '', '', '', '', '', '', data.typesTotal.cost, data.typesTotal.value, data.typesTotal.gain, data.typesTotal.gainPct, data.typesTotal.xirr, 100],
+  };
+
+  // One row a ticker across the brokers, in rupees, as on the Consolidated page.
+  const ids = new Set(list.map(a => a.id));
+  const saved = new Set(pickedBrokers);
+  pickedBrokers.clear();
+  list.forEach(a => pickedBrokers.add(a.id));
+  const merged = consolidatedLines().filter(l => l.qty > EPS && l.value != null && l.holders.some(h => ids.has(h.id))).sort((p, q) => q.value - p.value);
+  pickedBrokers.clear();
+  saved.forEach(id => pickedBrokers.add(id));
+  const mergedTotal = merged.reduce((n, l) => n + l.value, 0);
+  const consolidated = {
+    name: 'Consolidated', title: `${data.title}: consolidated, one row a ticker`, notes: [...notes.slice(0, 1), 'Every amount is in rupees, US holdings at today\'s rate.'],
+    columns: [col('Symbol', t.text, 14), col('Name', t.text, 34), col('Asset type', t.text, 13), col('Brokers', t.text, 24), col('Quantity', t.qty, 12), col('Avg cost (₹)', t.money2, 12), col('Price (₹)', t.money2, 12),
+      col('Invested (₹)', t.money), col('Market value (₹)', t.money), col('Unrealized gain (₹)', t.money), col('Unrealized gain %', t.pct), col('XIRR %', t.pct), col('Weight %', t.pct), col('Sector', t.text, 20)],
+    rows: merged.map(l => [l.symbol, l.name && l.name !== l.symbol ? l.name : '', typeLabel(l.group, l.holders.every(isUsd)), l.brokers, l.qty, l.avg, l.price, l.cost, l.value, l.gain, l.gainPct, l.xirr, mergedTotal ? l.value / mergedTotal * 100 : null, l.sector ?? '']),
+    total: ['Total', '', '', '', '', '', '', merged.reduce((n, l) => n + l.cost, 0), mergedTotal, merged.reduce((n, l) => n + (l.gain ?? 0), 0), '', '', 100, ''],
+  };
+
+  // A sheet for each broker, in its own currency.
+  const perBroker = data.brokers.map(b => {
+    const cur = b.currency === 'USD' ? '$' : '₹';
+    return {
+      name: b.name, title: `${b.name}: holdings`, notes: [`${[b.broker !== b.name && b.broker, b.kind, b.usd && 'in US dollars'].filter(Boolean).join(' · ')}. ${notes[0]}`],
+      columns: [col('Asset type', t.text, 13), col('Symbol', t.text, 14), col('Name', t.text, 34), col('Quantity', t.qty, 12), col(`Avg cost (${cur})`, t.money2, 12), col(`Price (${cur})`, t.money2, 12),
+        col(`Invested (${cur})`, t.money), col(`Market value (${cur})`, t.money), col(`Unrealized gain (${cur})`, t.money), col('Unrealized gain %', t.pct), col('XIRR %', t.pct), col('Weight %', t.pct)],
+      rows: b.types.flatMap(g => g.holdings.map(h => [typeLabel(g.label, b.usd), h.symbol, h.name && h.name !== h.symbol ? h.name : '', h.qty, h.avg, h.price, h.cost, h.value, h.gain, h.gainPct, h.xirr, h.weight])),
+      total: ['Total', '', '', '', '', '', b.summary.cost, b.summary.value, b.summary.gain, b.summary.gainPct, b.summary.xirr, 100],
+    };
+  });
+  return { sheets: list.length > 1 ? [summary, types, all, consolidated, ...perBroker] : [types, ...perBroker], fileName: `${data.fileName}.xlsx` };
+}
+
+function exportExcel(id) {
+  // From the Consolidated page, the brokers picked there; otherwise one broker or all of them.
+  const picked = accounts().filter(a => pickedBrokers.has(a.id));
+  const list = id ? [accountById(id)] : mergedPage && picked.length ? picked : accounts();
+  const { sheets, fileName } = excelSheets(list);
+  A.downloadFile(new File([workbookBlob(sheets)], fileName, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+  A.toast(`Saved ${fileName}, with ${A.plural(sheets.length, 'sheet')}`);
+}
+
 /* ---------- backup ---------- */
 
 const BACKUP_MARK = 'superapp-portfolio';
@@ -1065,7 +1152,7 @@ const fxNote = list => (list.some(isUsd) ? `<div class="status">${fxRate() ? `US
 
 function homeView(r) {
   const list = accounts();
-  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/consolidated">${icon('list')}<span>Consolidated</span></a><a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a><a class="btn sm" href="${HOME}/transfers">${icon('swap')}<span>Transfers</span></a><button class="btn sm" data-act="pf-export">${icon('download')}<span>Export PDF</span></button>` : ''}`;
+  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/consolidated">${icon('list')}<span>Consolidated</span></a><a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a><a class="btn sm" href="${HOME}/transfers">${icon('swap')}<span>Transfers</span></a><button class="btn sm" data-act="pf-export">${icon('download')}<span>Export PDF</span></button><button class="btn sm" data-act="pf-excel">${icon('download')}<span>Export Excel</span></button>` : ''}`;
   const body = list.length
     ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
@@ -1417,6 +1504,7 @@ function accountView(r) {
   const tools = `${reconChip(account, c)}
         <button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>
         <button class="btn sm" data-act="pf-export" data-id="${account.id}">${icon('download')}<span>Export PDF</span></button>
+        <button class="btn sm" data-act="pf-excel" data-id="${account.id}">${icon('download')}<span>Export Excel</span></button>
         <label class="btn sm">${icon('upload')}<span>Load files</span><input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden></label>`;
   A.view.innerHTML = `
     ${hero(account.name, `${account.broker} · ${KINDS[account.kind]}${account.clientId ? ` · ${account.clientId}` : ''}`, HOME,
@@ -1455,7 +1543,7 @@ function consolidatedView() {
   const c = { lines: consolidatedLines() };
   const held = c.lines.filter(l => l.qty > EPS).length;
   const count = new Set(c.lines.flatMap(l => l.holders.map(a => a.id))).size;
-  const tools = `<button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>`;
+  const tools = `<button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button><button class="btn sm" data-act="pf-excel">${icon('download')}<span>Export Excel</span></button>`;
   const summary = summaryOnly();
   A.view.innerHTML = `
     ${hero('Consolidated portfolio', `${A.plural(held, 'holding')} · ${A.plural(count, 'broker')}`, HOME)}
@@ -3633,6 +3721,7 @@ export async function portfolioAction(b) {
     case 'pf-backup': return saveBackup();
     case 'pf-info': return showSource(id);
     case 'pf-export': return exportPdf(id);
+    case 'pf-excel': return exportExcel(id);
     case 'pf-period': {
       A.ls.set('pfChangePeriod', id);
       const top = A.$('.scroll')?.scrollTop ?? 0;
