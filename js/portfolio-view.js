@@ -546,24 +546,33 @@ async function refreshTickers() {
 
 // The strip of benchmark levels with their change over the chosen period. `markets`
 // picks Indian, US or crypto tickers; all of them when left out.
+const MARKET_GROUPS = [
+  { id: 'in', label: 'Indian indices' },
+  { id: 'us', label: 'US indices' },
+  { id: 'crypto', label: 'Crypto benchmark pairs' },
+];
+
 function tickerStrip(markets) {
   const k = changePeriod();
   const list = MARKET_TICKERS.filter(x => !markets || markets.includes(x.market));
   if (!list.length) return '';
   const level = new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   const rupees = new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 0 });
-  const items = list.map(x => {
+  const card = x => {
     const m = A.S.market.find(r => r.symbol === tickerKey(x.id));
     const p = m ? (k === '1d' ? m.changePct : m.perf?.[k]) : null;
     const value = m?.price == null ? '–' : x.market === 'crypto' ? `₹${rupees.format(m.price)}` : level.format(m.price);
     return `<div class="pf-ticker" title="${A.esc(x.name)}"><span class="pf-ticker-name">${A.esc(x.short ?? x.name)}</span><span class="pf-ticker-value">${value}</span>
       <span class="pf-ticker-change ${tone(p)}">${p == null ? (m ? `No ${PERIOD_LABELS[k]} yet` : 'Not loaded') : pct(p)}</span></div>`;
-  }).join('');
+  };
+  // Each market in its own row, under its name when more than one shows.
+  const groups = MARKET_GROUPS.map(g => ({ ...g, items: list.filter(x => x.market === g.id) })).filter(g => g.items.length);
+  const rows = groups.map(g => `${groups.length > 1 ? `<h3 class="pf-ticker-group">${g.label}</h3>` : ''}<div class="pf-ticker-row">${g.items.map(card).join('')}</div>`).join('');
   const at = A.ls.get('pfTickersAt', 0);
-  const title = markets?.length === 1 ? { in: 'Indian indices', us: 'US indices', crypto: 'Crypto' }[markets[0]] : 'Markets';
+  const title = groups.length === 1 ? groups[0].label : 'Markets';
   return `<section class="pf-tickers" aria-label="${title}">
     <div class="pf-tickers-head"><h2 class="small-head">${title}${info('tickers')}</h2><span class="muted small">${PERIOD_LABELS[k]} · ${at ? `updated ${A.relDate(at)}, hourly` : 'loads hourly'}</span></div>
-    <div class="pf-ticker-row">${items}</div>
+    ${rows}
   </section>`;
 }
 
