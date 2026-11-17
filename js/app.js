@@ -417,7 +417,7 @@ function parseRoute(hash) {
   if (!p.length) return { name: 'home' };
   if (p[0] === 's' && p[1] === 'payments') return { name: 'payments', section: p[1], page: p[2] || 'dashboard', id: p[3] };
   if (p[0] === 's' && p[1] === 'retirals') {
-    const page = p[2] === 'lic' ? 'lic-new' : p[2] === 'a' && p[3] ? (p[4] === 'edit' ? 'lic-edit' : 'account') : 'home';
+    const page = p[2] === 'lic' ? 'lic-new' : p[2] === 't' && p[3] ? 'type' : p[2] === 'a' && p[3] ? (p[4] === 'edit' ? 'lic-edit' : 'account') : 'home';
     return { name: 'retirals', section: p[1], page, id: p[3] };
   }
   if (p[0] === 's' && p[1] === 'networth') return { name: 'networth', section: p[1], page: p[2] === 'milestones' ? 'milestones' : 'home', id: p[2] === 'milestones' ? 'milestones' : undefined };

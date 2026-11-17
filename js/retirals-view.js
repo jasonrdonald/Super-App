@@ -49,13 +49,23 @@ const policyOf = a => policySummary(a, A.S.retiralEntries.filter(e => e.accountI
 const accountById = id => A.S.retiralAccounts.find(a => a.id === id);
 const summaryOf = id => accountSummary(A.S.retiralStatements.filter(s => s.accountId === id), A.S.retiralEntries.filter(e => e.accountId === id));
 
+// Each kind of retiral has its own page, listing its accounts. The colours match Net worth's.
+const TYPES = {
+  epf: { label: 'EPF', long: "Employees' Provident Fund", icon: 'briefcase', cls: 'nw-epf', list: () => epfAccounts() },
+  nps: { label: 'NPS', long: 'National Pension System', icon: 'chart', cls: 'nw-nps', list: () => npsAccounts() },
+  ppf: { label: 'PPF', long: 'Public Provident Fund', icon: 'card', cls: 'nw-ppf', list: () => ppfAccounts() },
+  lic: { label: 'LIC', long: 'LIC policies', icon: 'shield', cls: 'nw-lic', list: () => policies() },
+};
+const typeOf = a => (isPolicy(a) ? 'lic' : isNps(a) ? 'nps' : isPpf(a) ? 'ppf' : 'epf');
+const typePath = type => `${HOME}/t/${type}`;
+
 export const retiralsNav = () => [
   { id: 'home', name: 'Overview', icon: 'pie', href: HOME },
-  ...accounts().map(a => ({ id: a.id, name: a.name, icon: isPolicy(a) ? 'shield' : isNps(a) ? 'chart' : isPpf(a) ? 'card' : 'briefcase', href: accountPath(a.id) })),
+  ...Object.entries(TYPES).filter(([, t]) => t.list().length).map(([id, t]) => ({ id, name: t.label, icon: t.icon, href: typePath(id) })),
   { id: 'imports', name: 'Data imports', icon: 'clock', href: '#/s/portfolio/imports', foot: true },
 ];
 
-export const retiralsRouteValid = r => !['account', 'lic-edit'].includes(r.page) || !!accountById(r.id);
+export const retiralsRouteValid = r => (r.page === 'type' ? !!TYPES[r.id] : !['account', 'lic-edit'].includes(r.page) || !!accountById(r.id));
 
 // EPF, NPS and PPF together for the home screen's tile, or a count of policies when there are neither.
 // LIC isn't added in, as a policy's worth depends on when it's claimed.
@@ -218,7 +228,7 @@ function ppfView(a) {
     s.canWithdraw && s.withdrawLimit ? `A partial withdrawal of up to ${money(s.withdrawLimit)} is allowed this year: half the lower of the balances at the end of the fourth year back and of last year.` : '',
     s.projected != null ? `Keeping up ${money(s.yearly)} a year at ${s.rate}%, it would be about ${money(s.projected)} on ${day(ends)}. Putting in the full ${money(PPF_LIMIT)} each year would make it about ${money(s.projectedMax)}.` : '',
   ].filter(Boolean) : [];
-  A.view.innerHTML = `${hero(a.name, ['Public Provident Fund', a.accountTail && `account ending ${a.accountTail}`, a.bank].filter(Boolean).join(' · '), HOME, `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Account options">${icon('more')}</button>`)}
+  A.view.innerHTML = `${hero(a.name, ['Public Provident Fund', a.accountTail && `account ending ${a.accountTail}`, a.bank].filter(Boolean).join(' · '), typePath(typeOf(a)), `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Account options">${icon('more')}</button>`)}
     <div class="scroll"><div class="pay-page pf-page">
       ${s ? `<div class="stats five">
         ${stat('Balance', money(s.balance), `As of ${day(s.asOf)}`)}
@@ -283,15 +293,103 @@ function homeView() {
       <p class="muted small">Only the employer's name, the last four digits of member IDs, PRANs, PPF accounts and policy numbers, and the amounts are kept, never your name, date of birth, UAN, PAN, bank details, address or nominee.</p></div></div>`;
     return bindFiles();
   }
-  const counts = [epf.length && A.plural(epf.length, 'EPF account'), nps.length && A.plural(nps.length, 'NPS account'), ppf.length && A.plural(ppf.length, 'PPF account'), lic.length && (lic.length === 1 ? '1 LIC policy' : `${lic.length} LIC policies`)];
-  A.view.innerHTML = `${hero('Retirals', counts.filter(Boolean).join(' · '), '#/')}
+  const d = dashboard();
+  const total = d.parts.reduce((n, p) => n + p.value, 0);
+  const now = new Date();
+  const today = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const stale = asOf => asOf && (Date.parse(today) - Date.parse(asOf)) / 864e5 > 120;
+  A.view.innerHTML = `${hero('Retirals', Object.values(TYPES).filter(t => t.list().length).map(t => t.label).join(' · '), '#/')}
     <div class="scroll"><div class="pay-page pf-page">
+      <div class="stats five">
+        ${stat('Retirement savings', money(d.savings), 'EPF, NPS and PPF today')}
+        ${stat('Interest building this year', money(d.building), 'EPF and PPF, credited after March')}
+        ${stat('Going in a year', money(d.yearly), [d.epfYear && `EPF ${money(d.epfYear)}`, d.ppfYear && `PPF ${money(d.ppfYear)}`, d.licYear && `LIC ${money(d.licYear)}`].filter(Boolean).join(' · ') || 'Nothing regular on record')}
+        ${stat('LIC payouts ahead', lic.length ? money(d.payouts) : '–', lic.length ? `Life cover ${money(d.cover)}` : 'No policies')}
+        ${stat('Next payment due', d.nextDue ? money(d.nextDue.amount) : '–', d.nextDue ? `${day(d.nextDue.date)} · ${A.esc(d.nextDue.what)}` : 'Nothing due in the next year')}
+      </div>
+      ${total ? `<section class="panel"><h2>Where it sits</h2>
+        <div class="nw-bar ret-mix" role="img" aria-label="${d.parts.map(p => `${p.label} ${Math.round(p.value / total * 100)}%`).join(', ')}">${d.parts.map(p => `<span class="${p.cls}" style="width:${p.value / total * 100}%"></span>`).join('')}</div>
+        <div class="ret-mix-key">${d.parts.map(p => `<span><i class="sw ${p.cls}"></i>${p.label} ${money(p.value)} <span class="muted">${(p.value / total * 100).toFixed(1)}%</span></span>`).join('')}</div>
+        <p class="muted small chart-note">LIC counts its minimum surrender value, the certain part today, as Net worth does. EPF leaves out the pension (EPS).</p>
+      </section>` : ''}
+      <div class="ret-types">${d.cards.map(c => `<a class="ret-type" href="${typePath(c.id)}">
+        <span class="ret-type-head"><i class="sw ${TYPES[c.id].cls}"></i><strong>${TYPES[c.id].label}</strong><span class="muted small">${A.esc(c.count)}</span>${icon('chevron')}</span>
+        <span class="ret-type-value">${money(c.value)}</span>
+        <span class="muted small">${c.lines.filter(Boolean).join('<br>')}</span>
+        ${c.asOf ? `<span class="small ${stale(c.asOf) ? 'down' : 'muted'}">As of ${day(c.asOf)}${stale(c.asOf) ? ', load a newer one' : ''}</span>` : ''}
+      </a>`).join('')}</div>
+      ${d.upcoming.length ? `<section class="panel"><h2>Coming up</h2>
+        <ul class="ret-upcoming">${d.upcoming.slice(0, 6).map(u => `<li><span class="ret-up-date">${day(u.date)}</span><span>${A.esc(u.what)}</span><span class="num">${u.amount != null ? `${u.upTo ? 'up to ' : ''}${money(u.amount)}` : ''}</span></li>`).join('')}</ul>
+      </section>` : ''}
       <div class="btn-row">${loadButton()}${addPolicyButton}</div>
       <p class="muted small chart-note">Load files takes EPF passbook PDFs, NPS statement CSVs, PPF account statements (.xlsx or .xls) and LIC premium receipts, in any mix.</p>
-      ${epfBlock(epf)}
-      ${npsBlock(nps)}
-      ${ppfBlock(ppf)}
-      ${policyBlock(lic)}
+    </div></div>`;
+  bindFiles();
+}
+
+// The overview's figures: totals, the mix, a card a type and what's due in the next year.
+function dashboard() {
+  const now = new Date();
+  const today = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const inYear = `${now.getFullYear() + 1}${today.slice(4)}`;
+  const march = `${now.getMonth() >= 3 ? now.getFullYear() + 1 : now.getFullYear()}-03-31`;
+  const epf = epfAccounts().map(a => ({ a, s: summaryOf(a.id), last: lastContribution(a.id) })).filter(x => x.s);
+  const nps = npsAccounts().map(a => ({ a, s: npsOf(a) })).filter(x => x.s);
+  const ppf = ppfAccounts().map(a => ({ a, s: ppfOf(a) })).filter(x => x.s);
+  const lic = policies().map(a => ({ a, s: policyOf(a) }));
+  const sum = (list, f) => list.reduce((n, x) => n + (f(x) ?? 0), 0);
+  const latest = list => list.reduce((d, x) => (x > d ? x : d), '');
+  const epfYear = sum(epf, x => (x.last ? (x.last.employee + x.last.employer) * 12 : 0));
+  const ppfYear = sum(ppf, x => x.s.yearly);
+  const licDue = lic.flatMap(x => x.s.left.filter(p => p.due <= inYear).map(p => ({ ...p, name: x.a.name })));
+  const licYear = licDue.reduce((n, p) => n + p.amount, 0);
+  const parts = [
+    { id: 'epf', label: 'EPF', cls: 'nw-epf', value: sum(epf, x => x.s.balance) },
+    { id: 'nps', label: 'NPS', cls: 'nw-nps', value: sum(nps, x => x.s.latest.value) },
+    { id: 'ppf', label: 'PPF', cls: 'nw-ppf', value: sum(ppf, x => x.s.balance) },
+    { id: 'lic', label: 'LIC', cls: 'nw-lic', value: sum(lic, x => x.s.surrenderFloor) },
+  ].filter(p => p.value > 0);
+  const n = (list, word) => A.plural(list.length, word);
+  const cards = [
+    epf.length && { id: 'epf', count: n(epf, 'account'), value: sum(epf, x => x.s.balance), asOf: latest(epf.map(x => x.s.asOf)),
+      lines: [`+ ${money(sum(epf, x => x.s.pension))} pension (EPS)`, epfYear ? `${money(epfYear / 12)} going in a month` : '', sum(epf, x => x.s.accrued) ? `About ${money(sum(epf, x => x.s.accrued))} interest building` : ''] },
+    nps.length && { id: 'nps', count: n(nps, 'account'), value: sum(nps, x => x.s.latest.value), asOf: latest(nps.map(x => x.s.latest.asOf)),
+      lines: [`${money(sum(nps, x => x.s.latest.gain))} gain on ${money(sum(nps, x => x.s.latest.contributed))} put in`, nps.length === 1 && nps[0].s.latest.xirr != null ? `${nps[0].s.latest.xirr.toFixed(2)}% a year, as NPS works it out` : ''] },
+    ppf.length && { id: 'ppf', count: n(ppf, 'account'), value: sum(ppf, x => x.s.balance), asOf: latest(ppf.map(x => x.s.asOf)),
+      lines: [`+ ${money(sum(ppf, x => x.s.accrued))} interest building`, ppf.length === 1 ? (ppf[0].s.extendedTo ? `Extended to ${day(ppf[0].s.extendedTo)}` : `Matures ${day(ppf[0].s.maturity)}`) : '', `${money(sum(ppf, x => x.s.room))} room this year`] },
+    lic.length && { id: 'lic', count: lic.length === 1 ? '1 policy' : `${lic.length} policies`, value: sum(lic, x => x.s.atPayout),
+      lines: ['Expected at payout', `Cover ${money(sum(lic, x => x.s.deathCover))} · surrender ${money(sum(lic, x => x.s.surrenderFloor))}`, `${sum(lic, x => x.s.left.length)} premiums left`] },
+  ].filter(Boolean);
+  // Dated things in the next year: premiums, PPF's deposit deadline, interest credits, maturities and payouts.
+  const upcoming = [
+    ...licDue.map(p => ({ date: p.due, what: `LIC premium · ${p.name}`, amount: p.amount, due: true })),
+    ...ppf.filter(x => x.s.room > 0).map(x => (x.s.belowMinimum
+      ? { date: march, what: `PPF minimum deposit to keep it active · ${x.a.name}`, amount: PPF_MINIMUM, due: true }
+      : { date: march, what: `Last day to add to PPF this year · ${x.a.name}`, amount: x.s.room, upTo: true })),
+    ...ppf.filter(x => x.s.accrued).map(x => ({ date: march, what: `PPF interest credited · ${x.a.name}`, amount: x.s.accrued })),
+    ...epf.filter(x => x.s.pendingInterest && x.s.accrued).map(x => ({ date: march, what: `EPF interest for the year, credited after March · ${x.a.name}`, amount: x.s.accrued })),
+    ...ppf.filter(x => x.s.maturity > today && x.s.maturity <= inYear).map(x => ({ date: x.s.maturity, what: `PPF matures · ${x.a.name}`, amount: null })),
+    ...lic.filter(x => x.s.payout > today && x.s.payout <= inYear).map(x => ({ date: x.s.payout, what: `LIC pays out · ${x.a.name}`, amount: x.s.atPayout })),
+  ].filter(u => u.date >= today && u.date <= inYear).sort((p, q) => p.date.localeCompare(q.date));
+  return {
+    parts, cards, upcoming, nextDue: upcoming.find(u => u.due) ?? null,
+    savings: sum(epf, x => x.s.balance) + sum(nps, x => x.s.latest.value) + sum(ppf, x => x.s.balance),
+    building: sum(epf, x => x.s.accrued) + sum(ppf, x => x.s.accrued),
+    epfYear, ppfYear, licYear, yearly: epfYear + ppfYear + licYear,
+    payouts: sum(lic, x => x.s.atPayout), cover: sum(lic, x => x.s.deathCover),
+  };
+}
+
+// One kind's page: its totals and accounts.
+function typeView(type) {
+  const t = TYPES[type];
+  const list = t.list();
+  const block = { epf: epfBlock, nps: npsBlock, ppf: ppfBlock, lic: policyBlock }[type](list).replace(/^\s*<h2 class="ret-head">.*?<\/h2>/, '');
+  const buttons = type === 'lic' ? `${receiptButton()}${addPolicyButton}` : loadButton(type === 'epf' ? 'Load passbooks' : 'Load statements');
+  A.view.innerHTML = `${hero(t.label, `${t.long} · ${A.plural(list.length, type === 'lic' ? 'policy' : 'account').replace('policys', 'policies')}`, HOME)}
+    <div class="scroll"><div class="pay-page pf-page">
+      ${block || `<div class="empty">${icon(t.icon)}<p>Nothing here yet.</p></div>`}
+      <div class="btn-row">${buttons}</div>
     </div></div>`;
   bindFiles();
 }
@@ -304,7 +402,7 @@ function npsView(a) {
   const latest = s?.latest;
   const moved = s?.txns.find(t => transactionKind(t) === 'Moved to Direct');
   const txns = [...(s?.txns ?? [])].sort((p, q) => q.date.localeCompare(p.date) || p.scheme.localeCompare(q.scheme));
-  A.view.innerHTML = `${hero(a.name, [a.pranTail && `PRAN ending ${a.pranTail}`, latest?.choice || a.choice].filter(Boolean).join(' · '), HOME, `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Account options">${icon('more')}</button>`)}
+  A.view.innerHTML = `${hero(a.name, [a.pranTail && `PRAN ending ${a.pranTail}`, latest?.choice || a.choice].filter(Boolean).join(' · '), typePath(typeOf(a)), `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Account options">${icon('more')}</button>`)}
     <div class="scroll"><div class="pay-page pf-page">
       ${latest ? `<div class="stats five">
         ${stat('Value', money(latest.value), `As of ${day(latest.asOf)}${latest.navDate ? `, at NAVs of ${day(latest.navDate)}` : ''}`)}
@@ -358,7 +456,7 @@ function policyView(a) {
   const receiptRows = new Map(A.S.retiralEntries.filter(e => e.accountId === a.id && e.kind === 'premium').map(e => [e.dueMonth, e]));
   const withReceipt = s.schedule.filter(d => receiptRows.has(d.due.slice(0, 7))).length;
   const plan = [a.plan, a.table ? `table ${a.table}` : '', a.policyTail ? `policy ending ${a.policyTail}` : ''].filter(Boolean).join(' · ');
-  A.view.innerHTML = `${hero(a.name, plan, HOME, `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Policy options">${icon('more')}</button>`)}
+  A.view.innerHTML = `${hero(a.name, plan, typePath(typeOf(a)), `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Policy options">${icon('more')}</button>`)}
     <div class="scroll"><div class="pay-page pf-page">
       <div class="stats five">
         ${stat('Sum assured', money(a.sumAssured), `${a.premiumYears} years of premiums, cover to ${monthName(a.maturity?.slice(0, 7) ?? s.payout.slice(0, 7))}`)}
@@ -513,7 +611,7 @@ function accountView(r) {
   const s = summaryOf(a.id);
   const statements = s?.years ?? [];
   const tick = ok => (ok ? `<span class="up">${icon('check')} Matches</span>` : '<span class="down">Differs</span>');
-  A.view.innerHTML = `${hero(a.name, `Employees' Provident Fund${a.memberTail ? ` · member ID ending ${a.memberTail}` : ''}`, HOME, `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Account options">${icon('more')}</button>`)}
+  A.view.innerHTML = `${hero(a.name, `Employees' Provident Fund${a.memberTail ? ` · member ID ending ${a.memberTail}` : ''}`, typePath(typeOf(a)), `<button class="icon-btn" data-act="ret-menu" data-id="${a.id}" aria-label="Account options">${icon('more')}</button>`)}
     <div class="scroll"><div class="pay-page pf-page">
       ${s ? summaryStats(s, lastContribution(a.id)) : ''}
       <div class="status">${icon('clock')}<span>As of ${s ? day(s.asOf) : '–'}, from passbooks for ${statements.map(y => fyName(y.fy)).join(', ')}.</span></div>
@@ -641,7 +739,8 @@ function bindFiles() {
 }
 
 export function retiralsView(r) {
-  if (r.page === 'account') accountView(r);
+  if (r.page === 'type') typeView(r.id);
+  else if (r.page === 'account') accountView(r);
   else if (r.page === 'lic-new' || r.page === 'lic-edit') policyForm(r);
   else homeView();
 }
