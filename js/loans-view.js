@@ -1,4 +1,5 @@
-// The Loans section: loans built from the amortization schedule PDFs you load.
+// The Loans section: loans built from the amortization schedule PDFs you load, and
+// revised by the lender's repayment schedule spreadsheets when the rate changes.
 // Every EMI due on or before today counts as paid. Amounts follow Portfolio's
 // privacy switch and the app's Short amounts setting.
 
@@ -8,7 +9,8 @@ import { CONFIG } from './config.js';
 import { shortAmounts, shortMoney } from './format.js';
 import { pdfLines } from './pdf-text.js';
 import { logImport } from './import-log.js';
-import { parseSchedule, loanSummary } from './loan.js';
+import { parseSchedule, parseRevision, applyRevision, loanSummary } from './loan.js';
+import { readWorkbook, readLegacyWorkbook } from './xlsx.js';
 
 const HOME = '#/s/loans';
 const MASK = '••••••';
@@ -72,7 +74,7 @@ function hero(title, sub, up, extra = '') {
 }
 
 const stat = (label, value, note = '') => `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value}</span><span class="stat-note">${note}</span></div>`;
-const loadButton = (label = 'Load schedule PDF') => `<label class="btn sm primary">${icon('upload')}<span>${label}</span><input id="loan-files" type="file" multiple accept=".pdf,application/pdf" hidden></label>`;
+const loadButton = (label = 'Load schedule') => `<label class="btn sm primary">${icon('upload')}<span>${label}</span><input id="loan-files" type="file" multiple accept=".pdf,.xlsx,.xls,application/pdf" hidden></label>`;
 
 // How much of the loan is repaid, as one bar: principal repaid, and what's still owed.
 function progress(loan, s) {
@@ -126,8 +128,8 @@ function emiChart(loan, s) {
     const bx = left + i * step;
     const yp = y(x.principal), yi = y(x.total);
     const upcoming = !s.paid.includes(x);
-    const tip = `EMI ${x.no} · ${day(x.date)}${upcoming ? ' · to come' : ' · paid'}\nPrincipal ${money(x.principal)} · interest ${money(x.interest)}\nOwed after it ${money(x.balance)}`;
-    return `<g class="loan-bar${upcoming ? ' upcoming' : ''}"><title>${A.esc(tip)}</title>
+    const tip = `EMI ${x.no} · ${day(x.date)}${upcoming ? ' · to come' : ' · paid'}${x.rate != null ? ` · ${x.rate}%` : ''}${x.projected ? ' · estimate' : ''}\nPrincipal ${money(x.principal)} · interest ${money(x.interest)}\nOwed after it ${money(x.balance)}`;
+    return `<g class="loan-bar${upcoming ? ' upcoming' : ''}${x.projected ? ' projected' : ''}"><title>${A.esc(tip)}</title>
       <rect class="hit" x="${bx}" y="${top}" width="${step}" height="${H - bottom - top}"></rect>
       <rect class="s-principal" x="${bx}" y="${yp}" width="${bw}" height="${Math.max(0, H - bottom - yp)}" rx="1.5"></rect>
       <rect class="s-interest" x="${bx}" y="${yi}" width="${bw}" height="${Math.max(0, yp - yi - 2)}" rx="1.5"></rect></g>`;
@@ -135,18 +137,53 @@ function emiChart(loan, s) {
   // The plot stretches to the width at a fixed height, so labels sit in HTML to keep their size.
   const at = x => `${(x / W * 100).toFixed(2)}%`;
   const split = s.emisPaid && s.emisLeft ? left + s.emisPaid * step - 1 : null;
+  // A dashed line where the rate changed, after the first rate.
+  const changes = (loan.rates ?? []).slice(1).map(r => ({ r, i: rows.findIndex(x => x.date >= r.from) })).filter(c => c.i > 0);
+  const marks = changes.map(({ i }) => `<line class="loan-rate" x1="${left + i * step - 1}" x2="${left + i * step - 1}" y1="0" y2="${H - bottom}" vector-effect="non-scaling-stroke"></line>`).join('');
+  const markLabels = changes.map(({ r, i }) => `<span class="loan-rate-label" style="left:${at(left + i * step - 1)}">${r.rate}% from ${monthName(r.from)}</span>`).join('');
+  const estimated = rows.some(x => x.projected);
   const years = rows.filter((x, i) => i && x.date.slice(0, 4) !== rows[i - 1].date.slice(0, 4))
     .map(x => `<span style="left:${at(left + rows.indexOf(x) * step)}">${x.date.slice(0, 4)}</span>`).join('');
-  return `<div class="loan-legend"><span><i class="sw s-principal"></i>Principal</span><span><i class="sw s-interest"></i>Interest</span><span class="muted"><i class="sw faded"></i>Faded: still to pay</span></div>
+  return `<div class="loan-legend"><span><i class="sw s-principal"></i>Principal</span><span><i class="sw s-interest"></i>Interest</span><span class="muted"><i class="sw faded"></i>Faded: still to pay</span>${estimated ? '<span class="muted"><i class="sw estimate"></i>Outlined: the app\'s estimate past the lender\'s schedule</span>' : ''}${changes.length ? '<span class="muted"><i class="sw rate-mark"></i>Rate change</span>' : ''}</div>
     <div class="loan-plot">
-      <svg class="loan-chart" viewBox="0 0 ${W} ${H - bottom}" preserveAspectRatio="none" role="img" aria-label="Each EMI split into principal and interest. The full schedule table below has every figure.">
+      <svg class="loan-chart" viewBox="0 0 ${W} ${H - bottom}" preserveAspectRatio="none" role="img" aria-label="Each EMI split into principal and interest${changes.length ? ', with a line where the rate changed' : ''}. The full schedule table below has every figure.">
         <line class="loan-base" x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}" vector-effect="non-scaling-stroke"></line>
         ${bars}
+        ${marks}
         ${split != null ? `<line class="loan-today" x1="${split}" x2="${split}" y1="0" y2="${H - bottom}" vector-effect="non-scaling-stroke"></line>` : ''}
       </svg>
       ${split != null ? `<span class="loan-today-label" style="left:${at(split)}">Today</span>` : ''}
+      ${markLabels}
       <div class="loan-years">${years}</div>
     </div>`;
+}
+
+// What the latest rate change did: against the original plan, the end date, EMIs and
+// interest, the monthly cost of it now, and the EMI that would have kept the old end.
+function rateInsights(l, s) {
+  const rates = l.rates ?? [];
+  if (rates.length < 2 || !l.baseline) return null;
+  const [prev, cur] = rates.slice(-2);
+  const change = { from: prev.rate, to: cur.rate, at: cur.from };
+  const up = cur.rate > prev.rate;
+  const end = l.schedule.at(-1).date;
+  const moreEmis = l.schedule.length - l.baseline.emis;
+  const moreInterest = l.totalInterest - l.baseline.totalInterest;
+  const atChange = l.schedule.filter(x => x.date < cur.from).at(-1)?.balance ?? l.amount;
+  const monthly = atChange * (cur.rate - prev.rate) / 1200;
+  // The EMI that pays off the same balance by the old end date at the new rate.
+  const months = (Number(l.baseline.end.slice(0, 4)) - Number(cur.from.slice(0, 4))) * 12 + Number(l.baseline.end.slice(5, 7)) - Number(cur.from.slice(5, 7)) + 1;
+  const rm = cur.rate / 1200;
+  const keepEnd = months > 0 ? atChange * rm * (1 + rm) ** months / ((1 + rm) ** months - 1) : null;
+  const sameEmi = Math.abs(l.emi - (l.baseline.emi ?? l.emi)) < 1;
+  const endText = end === l.baseline.end ? `still ends ${monthName(end)}` : `now ends ${monthName(end)} instead of ${monthName(l.baseline.end)}`;
+  const emiText = moreEmis ? `${A.plural(Math.abs(moreEmis), 'EMI')} ${moreEmis > 0 ? 'more' : 'fewer'}` : 'the same number of EMIs';
+  const items = [
+    `The rate went ${up ? 'up' : 'down'} from ${prev.rate}% to ${cur.rate}% from the EMI of ${day(cur.from)}. ${sameEmi ? `With the EMI kept at ${money(l.emi)}, the loan ${endText}: ${emiText}${moreEmis > 0 && l.schedule.at(-1).total < l.emi - 1 ? `, the last a smaller ${money(l.schedule.at(-1).total)}` : ''}, and ${money(Math.abs(moreInterest))} ${moreInterest >= 0 ? 'more' : 'less'} interest over the loan.` : `The EMI is now ${money(l.emi)}, and the loan ${endText}.`}`,
+    `On today's balance that's about ${money(Math.abs(monthly))} a month ${up ? 'more' : 'less'} going to interest, and ${up ? 'less' : 'more'} to the loan itself.`,
+    up && sameEmi && keepEnd && moreEmis > 0 ? `To still finish by ${monthName(l.baseline.end)}, the EMI would need to be about ${money(keepEnd)}, or ${money(keepEnd - l.emi)} more a month; a part-prepayment does the same.` : '',
+  ].filter(Boolean);
+  return { change, items };
 }
 
 function loanView(r) {
@@ -155,6 +192,9 @@ function loanView(r) {
   const first = l.schedule[0];
   const crossover = l.schedule.find(x => x.principal > x.interest);
   const tick = ok => (ok ? `<span class="up">${icon('check')} Matches</span>` : '<span class="down">Differs</span>');
+  const rateChange = rateInsights(l, s);
+  const change = rateChange?.change;
+  const revision = l.revisions?.at(-1);
   A.view.innerHTML = `${hero(l.name, [l.loanTail && `Loan ending ${l.loanTail}`, l.lender, l.rate != null && `${l.rate}%`].filter(Boolean).join(' · '), HOME, `<button class="icon-btn" data-act="loan-menu" data-id="${l.id}" aria-label="Loan options">${icon('more')}</button>`)}
     <div class="scroll"><div class="pay-page pf-page">
       <div class="stats five">
@@ -163,7 +203,7 @@ function loanView(r) {
         ${stat('Principal paid', money(s.principalPaid), `${pct(s.principalShare)} of the loan`)}
         ${stat('Interest paid', money(s.interestPaid), s.preEmiPaid ? `Includes ${money(s.preEmiPaid)} pre-EMI interest` : `${pct(s.interestShareSoFar)} of what you've paid`)}
         ${stat('Next EMI', s.next ? money(s.next.total) : '–', s.next ? `${day(s.next.date)} · ${money(s.next.principal)} principal, ${money(s.next.interest)} interest` : 'Loan repaid')}
-        ${stat('Rate', l.rate != null ? `${l.rate}%` : '–', l.benchmark ? `Floating, ${A.esc(l.benchmark)}` : 'As scheduled')}
+        ${stat('Rate', l.rate != null ? `${l.rate}%` : '–', change ? `${change.to > change.from ? 'Up' : 'Down'} from ${change.from}% from the ${monthName(change.at)} EMI` : l.benchmark ? `Floating, ${A.esc(l.benchmark)}` : 'As scheduled')}
       </div>
       ${progress(l, s)}
       <section class="panel"><h2>What it all costs</h2>
@@ -176,6 +216,7 @@ function loanView(r) {
         <ul class="loan-insights">
           <li>${icon('info')}<span>Of the ${money(s.paidSoFar)} you've paid, ${pct(s.interestShareSoFar)} went to interest and ${pct(100 - s.interestShareSoFar)} to the loan itself.</span></li>
           ${s.next ? `<li>${icon('info')}<span>The next EMI is ${pct(s.next.principal / s.next.total * 100)} principal. Interest's share shrinks every month as the balance falls${crossover === first ? ', and principal has been the bigger part from the first EMI' : crossover ? `; principal becomes the bigger part from ${monthName(crossover.date)}` : ''}.</span></li>` : ''}
+          ${rateChange ? rateChange.items.map(t => `<li>${icon('info')}<span>${t}</span></li>`).join('') : ''}
           ${s.emisLeft ? `<li>${icon('info')}<span>${pct(s.interestLeft / l.totalInterest * 100)} of the loan's interest, ${money(s.interestLeft)}, is still ahead. Paying some principal early cuts it, as interest runs on what's owed.</span></li>` : ''}
         </ul>
       </section>
@@ -193,16 +234,16 @@ function loanView(r) {
       </section>
       <section class="panel"><details class="pf-details"><summary>Full schedule · ${A.plural(s.emisTotal, 'EMI')}</summary>
         <div class="holdings-wrap"><table class="holdings lots">
-          <thead><tr><th>No.</th><th>Date</th>${['EMI', 'Principal', 'Interest', 'Owed after'].map(h => `<th class="num">${h}</th>`).join('')}<th>Status</th></tr></thead>
-          <tbody>${l.preEmi ? `<tr class="${l.preEmi.date && l.preEmi.date > s.next?.date ? 'ret-due' : ''}"><td>–</td><td>${l.preEmi.date ? day(l.preEmi.date) : '–'}</td><td class="num">${money(l.preEmi.amount)}</td><td class="num">${money(0)}</td><td class="num">${money(l.preEmi.amount)}</td><td class="num">${money(l.amount)}</td><td>Pre-EMI interest</td></tr>` : ''}
+          <thead><tr><th>No.</th><th>Date</th>${['Rate', 'EMI', 'Principal', 'Interest', 'Owed after'].map(h => `<th class="num">${h}</th>`).join('')}<th>Status</th></tr></thead>
+          <tbody>${l.preEmi ? `<tr class="${l.preEmi.date && l.preEmi.date > s.next?.date ? 'ret-due' : ''}"><td>–</td><td>${l.preEmi.date ? day(l.preEmi.date) : '–'}</td><td class="num"></td><td class="num">${money(l.preEmi.amount)}</td><td class="num">${money(0)}</td><td class="num">${money(l.preEmi.amount)}</td><td class="num">${money(l.amount)}</td><td>Pre-EMI interest</td></tr>` : ''}
           ${l.schedule.map(x => {
             const paid = s.paid.includes(x);
-            return `<tr class="${paid ? '' : 'ret-due'}${x === s.next ? ' loan-next' : ''}"><td>${x.no}</td><td>${day(x.date)}</td><td class="num">${money(x.total)}</td><td class="num">${money(x.principal)}</td><td class="num">${money(x.interest)}</td><td class="num">${money(x.balance)}</td>
-              <td>${paid ? `${icon('check')} Paid` : x === s.next ? 'Next' : 'To come'}</td></tr>`;
+            return `<tr class="${paid ? '' : 'ret-due'}${x === s.next ? ' loan-next' : ''}"><td>${x.no}</td><td>${day(x.date)}</td><td class="num">${x.rate ?? l.rates?.[0]?.rate ?? l.rate ?? '–'}%</td><td class="num">${money(x.total)}</td><td class="num">${money(x.principal)}</td><td class="num">${money(x.interest)}</td><td class="num">${money(x.balance)}</td>
+              <td>${paid ? `${icon('check')} Paid` : x === s.next ? 'Next' : x.projected ? '<span class="muted">Estimate</span>' : 'To come'}</td></tr>`;
           }).join('')}</tbody>
         </table></div>
       </details></section>
-      <div class="status">${icon('clock')}<span>From the schedule printed ${l.generated ? `on ${day(l.generated)}` : 'by your lender'}. Every EMI due up to today is taken as paid. ${l.benchmark ? 'The rate floats with the lender\'s benchmark, so a change in it changes the EMIs or the term: load a fresh schedule when that happens.' : 'Load a fresh schedule if the rate or EMI changes.'} Schedule checks against its own figures: ${tick(l.matches)}</span></div>
+      <div class="status">${icon('clock')}<span>From the schedule printed ${l.generated ? `on ${day(l.generated)}` : 'by your lender'}${revision ? `, revised by the lender's repayment schedule for ${monthName(revision.from)} to ${monthName(revision.to)} at ${revision.rate}% (${revision.matches ? 'its figures and the loan\'s balance all matching' : 'not all of its figures matching'}). EMIs after ${monthName(revision.to)} are the app's estimate at ${revision.rate}% with the same EMI, until the next schedule` : ''}. Every EMI due up to today is taken as paid. ${l.benchmark ? 'The rate floats with the lender\'s benchmark, so a change in it changes the EMIs or the term: load a fresh schedule when that happens.' : 'Load a fresh schedule if the rate or EMI changes.'} Schedule checks against its own figures: ${tick(l.matches)}</span></div>
     </div></div>`;
   bindFiles();
 }
@@ -221,22 +262,45 @@ async function saveSchedule(p) {
   return loan;
 }
 
+// A revised repayment schedule goes to the loan whose balance it carries on from,
+// or to the only loan there is.
+async function saveRevision(rev) {
+  const owedBefore = l => l.schedule.filter(x => x.date < rev.from && !x.projected).at(-1)?.balance ?? l.amount;
+  const loan = A.S.loans.find(l => Math.abs(owedBefore(l) - rev.opening) < 1) ?? (A.S.loans.length === 1 ? A.S.loans[0] : null);
+  if (!loan) throw new Error(A.S.loans.length ? 'its opening balance doesn\'t match any loan' : 'load the loan\'s full schedule PDF first');
+  const next = applyRevision(loan, rev);
+  A.S.loans = A.S.loans.map(l => (l.id === loan.id ? next : l));
+  await db.put('loans', next);
+  return { loan: next, before: loan, rev };
+}
+
 async function loadFiles(files) {
   const saved = [];
+  const revised = [];
   const problems = [];
   for (const file of files) {
     try {
+      if (/\.xlsx?$/i.test(file.name)) {
+        const sheets = /\.xlsx$/i.test(file.name) ? await readWorkbook(file) : readLegacyWorkbook(await file.arrayBuffer());
+        revised.push(await saveRevision(parseRevision(sheets)));
+        continue;
+      }
       saved.push(await saveSchedule(parseSchedule(await pdfLines(await file.arrayBuffer()))));
     } catch (e) {
       problems.push(`${file.name}: ${e.message}`);
     }
   }
   A.markDirty();
-  if (saved.length === 1 && A.S.route?.page !== 'loan') A.go(loanPath(saved[0].id));
+  const one = saved[0] ?? revised[0]?.loan;
+  if (saved.length + revised.length === 1 && A.S.route?.page !== 'loan') A.go(loanPath(one.id));
   else A.refresh();
   const unchecked = saved.filter(l => !l.matches).length;
   if (saved.length) logImport({ category: 'loans', source: saved.map(l => l.name).join(', '), what: A.plural(saved.length, 'loan schedule'), points: saved.reduce((n, l) => n + l.schedule.length, 0), detail: `${saved.map(l => `${l.schedule.length} EMIs`).join(', ')}, ${unchecked ? `${unchecked} not matching its own figures` : 'matching their own figures'}`, dataTo: saved.map(l => l.generated).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d ?? '')).sort().at(-1) ?? '' });
-  A.toast([saved.length && `Loaded ${A.plural(saved.length, 'loan schedule')}, ${unchecked ? `${unchecked} not matching its own figures` : 'matching its own figures'}`, problems.length && `Couldn't use ${problems.join('; ')}`].filter(Boolean).join('. '));
+  for (const { loan, rev } of revised) {
+    logImport({ category: 'loans', source: loan.name, what: `Repayment schedule at ${rev.rate}%`, points: rev.rows.length, detail: `${A.plural(rev.rows.length, 'EMI')}, ${monthName(rev.from)} to ${monthName(rev.to)}, ${rev.matches && loan.continues ? 'matching its own figures and the loan\'s balance' : 'not matching its own figures or the loan\'s balance'}. The loan now ends ${monthName(loan.schedule.at(-1).date)}.`, dataTo: rev.to });
+  }
+  const revisedText = revised.map(({ loan, rev }) => `Revised ${loan.name} to ${rev.rate}% from ${monthName(rev.from)}, ending ${monthName(loan.schedule.at(-1).date)}${rev.matches && loan.continues ? '' : ', though its figures don\'t all match'}`);
+  A.toast([saved.length && `Loaded ${A.plural(saved.length, 'loan schedule')}, ${unchecked ? `${unchecked} not matching its own figures` : 'matching its own figures'}`, ...revisedText, problems.length && `Couldn't use ${problems.join('; ')}`].filter(Boolean).join('. '));
 }
 
 function bindFiles() {
