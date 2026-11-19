@@ -4,7 +4,7 @@ import { CONFIG } from './config.js';
 import { shortAmounts, shortMoney } from './format.js';
 import { CHANGE_PERIODS, ISSUE_LABEL, xirr, costHeldAt, baseSymbol, allActions, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
-import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, cryptoStarts, listedSecurities, setOffline, marketTickers, MARKET_TICKERS, EVENT_GAP_MS } from './market.js';
+import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, cryptoStarts, listedSecurities, setOffline, marketTickers, MARKET_TICKERS, indexMembers, firstPrice, EVENT_GAP_MS } from './market.js';
 import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, unzipFiles } from './public-data.js';
 import { CORPORATE_ACTIONS } from './corporate-actions.js';
 import { createMilestones } from './milestones.js';
@@ -13,7 +13,7 @@ import { workbookBlob } from './xlsx-write.js';
 import { logImport, IMPORT_CATEGORIES, daysSince } from './import-log.js';
 import { tickerFor, companyPart } from './tickers.js';
 import { SOURCES, DATA_POINTS, BACKUP_FILES, BACKUP_CONTENTS, BACKUP_LEAVES_OUT, BACKUP_NEEDS_NOTHING } from './disclosures.js';
-import { GROUPINGS, bandOf, orderBands, RATING_SCALES, momentumRating, growthRating, valuationRating, profitabilityRating, verdictRating } from './ratings.js';
+import { GROUPINGS, setIndexMembers, bandOf, orderBands, RATING_SCALES, momentumRating, growthRating, valuationRating, profitabilityRating, verdictRating } from './ratings.js';
 
 const KINDS = { stock: 'Stocks', mf: 'Mutual funds', crypto: 'Crypto' };
 const BROKERS = ['Zerodha', 'HDFC Securities', 'Vested', 'Nippon MF', 'Aionion Capital', 'Zebpay', 'Blockchain Wallet', 'Coinbase Wallet', 'Other'];
@@ -111,7 +111,34 @@ const chosenColumns = () => {
   return OPTIONAL_COLUMNS.filter(c => picked.has(c.key));
 };
 const BROKERS_COLUMN = { key: 'brokers', label: 'Brokers', text: true, links: true };
-const columns = () => [...COLUMNS.slice(0, 2), ...(mergedPage ? [BROKERS_COLUMN] : []), ...COLUMNS.slice(2), ...chosenColumns()];
+
+// The table's basic view keeps only what changed: market value, the change over the
+// chosen period and the total gain, each with its percentage. All columns shows the rest.
+const tableView = () => (A.ls.get('pfTableView', 'basic') === 'all' ? 'all' : 'basic');
+const changeAmount = (r, k) => {
+  const c = r.changes?.[k];
+  return c != null && typeof c === 'object' ? c.amount : c ?? (k === '1d' ? r.dayGain : null);
+};
+const changeColumn = () => {
+  const k = changePeriod();
+  return {
+    key: 'periodChange', label: `Change · ${PERIOD_LABELS[k]}`, get: r => changeAmount(r, k), f: v => money(v, true, true), tone: true, src: 'change',
+    sub: r => {
+      const c = r.changes?.[k];
+      if (c != null && typeof c === 'object') return c.pct == null ? '' : pct(c.pct);
+      const a = changeAmount(r, k), base = r.value == null || a == null ? null : r.value - a;
+      return base > 0 ? pct(a / base * 100) : '';
+    },
+  };
+};
+const basicColumns = () => [
+  { ...COLUMNS[0], sub: r => (r.name && r.name !== r.symbol ? A.esc(r.name) : '') },
+  { ...COLUMNS.find(c => c.key === 'value'), f: v => money(v, false, true) },
+  changeColumn(),
+  { ...COLUMNS.find(c => c.key === 'gain'), f: v => money(v, true, true), sub: r => (r.gainPct == null ? '' : pct(r.gainPct)) },
+];
+const columns = () => (tableView() === 'basic' ? basicColumns() : [...COLUMNS.slice(0, 2), ...(mergedPage ? [BROKERS_COLUMN] : []), ...COLUMNS.slice(2), ...chosenColumns()]);
+const valueOf = (col, r) => (col.get ? col.get(r) : r[col.key]);
 const columnOf = key => columns().find(c => c.key === key) ?? COLUMNS[0];
 
 const yieldLine = v => (v == null || v <= 0 ? '' : `${v.toFixed(2)}% on cost`);
@@ -158,6 +185,11 @@ const formatters = {
   [CONFIG.currency]: new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }),
   USD: new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }),
 };
+// Whole units, for compact tables; dollars keep their cents.
+const wholeFormatters = {
+  [CONFIG.currency]: new Intl.NumberFormat(CONFIG.locale, { style: 'currency', currency: CONFIG.currency, maximumFractionDigits: 0 }),
+  USD: formatters.USD,
+};
 const MASK = '••••••';
 const isPrivate = () => A.ls.get('pfPrivate', false);
 
@@ -167,10 +199,10 @@ function perShare(v) {
   return formatters[shown].format(v);
 }
 
-function money(v, signed) {
+function money(v, signed, whole) {
   if (v == null) return '–';
   if (isPrivate()) return MASK;
-  const text = shortAmounts() ? shortMoney(v, shown) : formatters[shown].format(v);
+  const text = shortAmounts() ? shortMoney(v, shown) : (whole ? wholeFormatters : formatters)[shown].format(v);
   return signed && v > 0 ? `+${text}` : text;
 }
 const pct = v => (v == null ? '–' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`);
@@ -537,6 +569,7 @@ async function refreshTickers() {
     await db.putMany('market', changed);
     A.ls.set('pfTickersAt', t);
     logImport({ category: 'public', source: 'Markets strip', what: 'Index and coin levels', points: changed.length, detail: changed.map(m => m.name).join(', '), dataTo: isoDay(t) });
+    fillAllStarts();
     if (A.$('.pf-tickers')) redraw();
   } catch {
     // Left as it was; the next visit tries again.
@@ -545,12 +578,35 @@ async function refreshTickers() {
   }
 }
 
+// TradingView gives most indices' change since launch; Midcap 150 and the coins take
+// their first monthly price from Yahoo instead, once, as it never changes.
+let allLoading = false;
+async function fillAllStarts() {
+  if (allLoading || dataMode() === 'backup') return;
+  const due = MARKET_TICKERS.filter(x => x.yahooAll && !(A.S.market.find(m => m.symbol === tickerKey(x.id))?.allStart > 0));
+  if (!due.length) return;
+  allLoading = true;
+  try {
+    for (const x of due) {
+      const first = await firstPrice(...x.yahooAll).catch(() => null);
+      if (!first) continue;
+      await db.put('market', saveMarket(tickerKey(x.id), { allStart: first.price, allFrom: first.month }));
+    }
+    if (A.$('.pf-tickers')) redraw();
+  } finally {
+    allLoading = false;
+  }
+}
+
 // The strip of benchmark levels with their change over the chosen period. `markets`
 // picks Indian, US or crypto tickers; all of them when left out.
+// Changes since launch run to thousands of percent, so those drop the decimals.
+const bigPct = v => (Math.abs(v) >= 1000 ? `${v > 0 ? '+' : '-'}${new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 0 }).format(Math.abs(v))}%` : pct(v));
+
 const MARKET_GROUPS = [
-  { id: 'in', label: 'Indian indices' },
-  { id: 'us', label: 'US indices' },
-  { id: 'crypto', label: 'Crypto benchmark pairs' },
+  { id: 'in', label: 'India' },
+  { id: 'us', label: 'US' },
+  { id: 'crypto', label: 'Crypto' },
 ];
 
 function tickerStrip(markets) {
@@ -561,18 +617,19 @@ function tickerStrip(markets) {
   const rupees = new Intl.NumberFormat(CONFIG.locale, { maximumFractionDigits: 0 });
   const card = x => {
     const m = A.S.market.find(r => r.symbol === tickerKey(x.id));
-    const p = m ? (k === '1d' ? m.changePct : m.perf?.[k]) : null;
+    const p = !m ? null : k === '1d' ? m.changePct : k === 'all' && m.perf?.all == null && m.allStart > 0 && m.price ? (m.price / m.allStart - 1) * 100 : m.perf?.[k];
     const value = m?.price == null ? '–' : x.market === 'crypto' ? `₹${rupees.format(m.price)}` : level.format(m.price);
     return `<div class="pf-ticker" title="${A.esc(x.name)}"><span class="pf-ticker-name">${A.esc(x.short ?? x.name)}</span><span class="pf-ticker-value">${value}</span>
-      <span class="pf-ticker-change ${tone(p)}">${p == null ? (m ? `No ${PERIOD_LABELS[k]} yet` : 'Not loaded') : pct(p)}</span></div>`;
+      <span class="pf-ticker-change ${tone(p)}">${p == null ? (m ? `No ${PERIOD_LABELS[k]} yet` : 'Not loaded') : bigPct(p)}</span></div>`;
   };
   // Each market in its own row, under its name when more than one shows.
   const groups = MARKET_GROUPS.map(g => ({ ...g, items: list.filter(x => x.market === g.id) })).filter(g => g.items.length);
   const rows = groups.map(g => `${groups.length > 1 ? `<h3 class="pf-ticker-group">${g.label}</h3>` : ''}<div class="pf-ticker-row">${g.items.map(card).join('')}</div>`).join('');
   const at = A.ls.get('pfTickersAt', 0);
   const title = groups.length === 1 ? groups[0].label : 'Markets';
+  const span = k === 'all' ? 'All, since launch' : PERIOD_LABELS[k];
   return `<section class="pf-tickers" aria-label="${title}">
-    <div class="pf-tickers-head"><h2 class="small-head">${title}${info('tickers')}</h2><span class="muted small">${PERIOD_LABELS[k]} · ${at ? `updated ${A.relDate(at)}, hourly` : 'loads hourly'}</span></div>
+    <div class="pf-tickers-head"><h2 class="small-head">${title}${info('tickers')}</h2><span class="muted small">${span} · ${at ? `updated ${A.relDate(at)}, hourly` : 'loads hourly'}</span></div>
     ${rows}
   </section>`;
 }
@@ -815,8 +872,8 @@ function stat(label, value, note = '', cls = '') {
 
 // The change in value over a chosen period: the day's, or how much today's holdings
 // moved over the past week, month, six months, this year or a year.
-const PERIOD_LABELS = { '1d': '1D', '5d': '5D', '1m': '1M', '6m': '6M', ytd: 'YTD', '1y': '1Y' };
-const PERIOD_NAMES = { '1d': 'today', '5d': 'over the past week', '1m': 'over the past month', '6m': 'over the past 6 months', ytd: 'this year', '1y': 'over the past year' };
+const PERIOD_LABELS = { '1d': '1D', '5d': '5D', '1m': '1M', '6m': '6M', ytd: 'YTD', '1y': '1Y', all: 'All' };
+const PERIOD_NAMES = { '1d': 'today', '5d': 'over the past week', '1m': 'over the past month', '6m': 'over the past 6 months', ytd: 'this year', '1y': 'over the past year', all: 'since you bought' };
 const changePeriod = () => {
   const k = A.ls.get('pfChangePeriod', '1d');
   return CHANGE_PERIODS.includes(k) ? k : '1d';
@@ -1383,7 +1440,7 @@ function rowsToShow(c) {
   const col = columnOf(V.sort);
   return rows.sort((a, b) => {
     if (col.text) return (a[col.key] || '').localeCompare(b[col.key] || '') * V.dir;
-    return ((a[col.key] ?? -Infinity) - (b[col.key] ?? -Infinity)) * V.dir;
+    return ((valueOf(col, a) ?? -Infinity) - (valueOf(col, b) ?? -Infinity)) * V.dir;
   });
 }
 
@@ -1397,6 +1454,7 @@ function holdingsTable(account, c) {
 
 function bucketsOf(rows) {
   const key = groupKey();
+  if (key === 'index') syncMembers();
   const names = key === 'asset'
     ? GROUPS.filter(g => rows.some(r => r.group === g))
     : orderBands(key, new Set(rows.map(r => bandOf(key, r))));
@@ -1430,6 +1488,31 @@ const groupKey = () => {
   return GROUPINGS[key] ? key : 'asset';
 };
 
+// Nifty 50, Next 50 and Midcap 150 members, for the Index grouping. NSE changes them
+// twice a year, so they're checked weekly and kept with the public data.
+const MEMBERS_KEY = 'IX:members';
+let membersLoading = false;
+const syncMembers = () => setIndexMembers(A.S.market.find(m => m.symbol === MEMBERS_KEY)?.members);
+async function refreshMembers() {
+  const rec = A.S.market.find(m => m.symbol === MEMBERS_KEY);
+  if (membersLoading || dataMode() === 'backup' || Date.now() - (rec?.quotedAt ?? 0) < EVENTS_MAX_AGE) return;
+  membersLoading = true;
+  try {
+    const members = await indexMembers();
+    const count = Object.values(members).reduce((n, l) => n + l.length, 0);
+    if (!count) return;
+    const t = Date.now();
+    await db.put('market', saveMarket(MEMBERS_KEY, { name: 'Nifty index members', price: 0, members, quotedAt: t }));
+    syncMembers();
+    logImport({ category: 'public', source: 'Index members', what: 'Nifty 50, Next 50 and Midcap 150 lists', points: count, detail: Object.entries(members).map(([k, l]) => `${l.length} ${{ nifty50: 'Nifty 50', next50: 'Nifty Next 50', mid150: 'Nifty Midcap 150' }[k]}`).join(', '), dataTo: isoDay(t) });
+    if (groupKey() === 'index') redraw();
+  } catch {
+    // Tried again on the next visit.
+  } finally {
+    membersLoading = false;
+  }
+}
+
 function columnHeader(col) {
   const on = V.sort === col.key;
   return `<th${col.text ? '' : ' class="num"'} aria-sort="${on ? (V.dir > 0 ? 'ascending' : 'descending') : 'none'}"><span class="pf-th"><button data-sort="${col.key}">${col.label}${on ? (V.dir > 0 ? ' ▲' : ' ▼') : ''}</button>${col.src ? info(col.src) : ''}</span></th>`;
@@ -1439,21 +1522,21 @@ function groupTable(account, rows) {
   const total = summarizeAll(rows);
   const COLS = columns();
   const cell = (col, r) => {
-    const v = r[col.key];
+    const v = valueOf(col, r);
     if (col.links) return `<td class="pf-name" title="${A.esc(v)}">${r.holders.map(a => `<a class="pf-link" href="${accountPath(a.id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(a.name)}</a>`).join(', ')}</td>`;
     if (col.text) return `<td class="pf-name" title="${A.esc(v)}">${A.esc(v) || '–'}</td>`;
     const sub = col.sub?.(r);
     return `<td class="num ${col.tone ? tone(v) : ''}">${col.f(v, r)}${sub ? `<small>${sub}</small>` : ''}</td>`;
   };
-  const totals = { xirr: total.xirr, cost: total.cost, value: total.value, dividends: total.dividends, dayGain: total.dayGain, dayPct: total.dayPct, gain: total.gain, gainPct: total.gainPct, realized: total.realized, realizedPct: total.realizedPct };
-  return `<div class="holdings-wrap"><table class="holdings">
+  const totals = { xirr: total.xirr, cost: total.cost, value: total.value, dividends: total.dividends, dayGain: total.dayGain, dayPct: total.dayPct, gain: total.gain, gainPct: total.gainPct, realized: total.realized, realizedPct: total.realizedPct, periodChange: changeOf(total).amount };
+  return `<div class="holdings-wrap"><table class="holdings${tableView() === 'basic' ? ' pf-basic' : ''}">
     <thead><tr>${COLS.map(columnHeader).join('')}</tr></thead>
     <tbody>${rows.map(r => {
       const owners = account ? [account] : r.holders;
       const details = owners.map(a => reviewDetails(a, r.symbol)).filter(Boolean).join(' · ');
       const locked = owners.map(a => lockedLine(a, r.symbol)).filter(Boolean).join(' · ');
       return `<tr>
-      <th scope="row"><a href="${accountPath(owners[0].id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(r.symbol)}</a></th>
+      <th scope="row"><a href="${accountPath(owners[0].id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(r.symbol)}</a>${COLS[0].sub?.(r) ? `<small class="pf-row-name">${COLS[0].sub(r)}</small>` : ''}</th>
       ${COLS.slice(1).map(col => cell(col, r)).join('')}
     </tr>${details ? `<tr class="lot-note"><td colspan="${COLS.length}">${icon('check')}${A.esc(details)}</td></tr>` : ''}${locked ? `<tr class="lot-note"><td colspan="${COLS.length}">${icon('lock')}${A.esc(locked)}</td></tr>` : ''}`;
     }).join('')}</tbody>
@@ -1499,7 +1582,7 @@ function holdingsBody(account, c, { filter = '', notes = '', tools = '', summary
       <div class="pf-sort">
         <label for="pf-group">Group by</label>
         <select class="select" id="pf-group">${Object.entries(GROUPINGS).map(([k, g]) => `<option value="${k}"${k === groupKey() ? ' selected' : ''}>${g.label}</option>`).join('')}</select>
-        ${summary ? '' : `<button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>`}
+        ${summary ? '' : `<div class="seg pf-view" role="group" aria-label="Columns">${[['basic', 'Basic'], ['all', 'All columns']].map(([k, l]) => `<button data-act="pf-table-view" data-id="${k}" aria-pressed="${tableView() === k}">${l}</button>`).join('')}</div>${tableView() === 'all' ? `<button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>` : ''}`}
       </div>
       <div id="pf-table">${summary ? summaryTable(c) : holdingsTable(account, c)}</div>`;
 }
@@ -1517,7 +1600,7 @@ function bindHoldings(table, again) {
     draw();
   };
   A.$('#pf-sort')?.addEventListener('change', e => sortBy(e.target.value));
-  A.$('#pf-group').addEventListener('change', e => { A.ls.set('pfGroupBy', e.target.value); draw(); });
+  A.$('#pf-group').addEventListener('change', e => { A.ls.set('pfGroupBy', e.target.value); draw(); if (e.target.value === 'index') refreshMembers(); });
   A.$('#pf-dir')?.addEventListener('click', () => { V.dir = -V.dir; draw(); });
   A.$('#pf-q')?.addEventListener('input', e => { V.q = e.target.value; draw(); });
   A.view.querySelectorAll('[data-show]').forEach(b => b.addEventListener('click', () => { V.show = b.dataset.show; again(); }));
@@ -3766,6 +3849,7 @@ export async function portfolioAction(b) {
     case 'pf-excel': return exportExcel(id);
     case 'pf-period': {
       A.ls.set('pfChangePeriod', id);
+      if (id === 'all') fillAllStarts();
       const top = A.$('.scroll')?.scrollTop ?? 0;
       A.refresh();
       if (A.$('.scroll')) A.$('.scroll').scrollTop = top;
@@ -3775,6 +3859,14 @@ export async function portfolioAction(b) {
       A.ls.set('pfPrivate', !isPrivate());
       return A.refresh();
     case 'pf-columns': return chooseColumns();
+    case 'pf-table-view': {
+      A.ls.set('pfTableView', id);
+      const scroller = A.$('.scroll');
+      const top = scroller?.scrollTop ?? 0;
+      A.refresh();
+      if (A.$('.scroll')) A.$('.scroll').scrollTop = top;
+      return undefined;
+    }
     case 'pf-link': return linkTransfer(id);
     case 'pf-unlink':
       A.S.transfers = A.S.transfers.filter(x => x.id !== id);
@@ -3838,6 +3930,7 @@ export function portfolioView(r) {
   else homeView(r);
   // The strip's indices load at most once an hour, whenever a page showing it opens.
   if (A.$('.pf-tickers')) refreshTickers();
+  if (groupKey() === 'index') refreshMembers();
   if (!A.S.brokerAccounts.length || !firstVisit) return;
   // Once per launch: picks up a stale market, or a load cut short by closing the app.
   firstVisit = false;

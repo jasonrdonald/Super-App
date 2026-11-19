@@ -187,11 +187,11 @@ export async function sectorPes() {
 export const MARKET_TICKERS = [
   { id: 'nifty50', name: 'Nifty 50', market: 'in', tv: ['india', 'NSE:NIFTY'] },
   { id: 'next50', name: 'Nifty Next 50', market: 'in', tv: ['india', 'NSE:NIFTYJR'] },
-  { id: 'mid150', name: 'Nifty Midcap 150', short: 'Midcap 150', market: 'in', yahoo: 'NIFTYMIDCAP150.NS' },
+  { id: 'mid150', name: 'Nifty Midcap 150', short: 'Midcap 150', market: 'in', yahoo: 'NIFTYMIDCAP150.NS', yahooAll: ['NIFTYMIDCAP150.NS', 'index'] },
   { id: 'sp500', name: 'S&P 500', market: 'us', tv: ['america', 'SP:SPX'] },
   { id: 'nasdaq100', name: 'Nasdaq 100', market: 'us', tv: ['america', 'NASDAQ:NDX'] },
-  { id: 'btcinr', name: 'BTC/INR', market: 'crypto', coin: 'bitcoin' },
-  { id: 'ethinr', name: 'ETH/INR', market: 'crypto', coin: 'ethereum' },
+  { id: 'btcinr', name: 'BTC/INR', market: 'crypto', coin: 'bitcoin', yahooAll: ['BTC', 'crypto'] },
+  { id: 'ethinr', name: 'ETH/INR', market: 'crypto', coin: 'ethereum', yahooAll: ['ETH', 'crypto'] },
 ];
 
 const PERF_COLUMNS = ['Perf.W', 'Perf.1M', 'Perf.6M', 'Perf.YTD', 'Perf.Y'];
@@ -210,13 +210,13 @@ export async function marketTickers({ coinLong = true } = {}) {
     jobs.push((async () => {
       const res = await web(`https://scanner.tradingview.com/${market}/scan`, {
         method: 'POST', signal: timed(),
-        body: JSON.stringify({ symbols: { tickers: list.map(t => t.tv[1]) }, columns: ['close', 'change', 'change_abs', ...PERF_COLUMNS] }),
+        body: JSON.stringify({ symbols: { tickers: list.map(t => t.tv[1]) }, columns: ['close', 'change', 'change_abs', ...PERF_COLUMNS, 'Perf.All'] }),
       });
       if (!res.ok) throw new Error(`Price service answered ${res.status}`);
       for (const { s, d } of (await res.json()).data ?? []) {
         const t = list.find(x => x.tv[1] === s);
         if (!t || d[0] == null) continue;
-        const perf = Object.fromEntries(PERIODS.map((k, i) => [k, d[3 + i]]).filter(([, v]) => Number.isFinite(v)));
+        const perf = Object.fromEntries([...PERIODS, 'all'].map((k, i) => [k, d[3 + i]]).filter(([, v]) => Number.isFinite(v)));
         out.set(t.id, { price: d[0], changePct: d[1], change: d[2], perf });
       }
     })());
@@ -259,6 +259,13 @@ export async function marketTickers({ coinLong = true } = {}) {
   const results = await Promise.allSettled(jobs);
   if (!out.size) throw results.find(r => r.status === 'rejected')?.reason ?? new Error('No market data');
   return out;
+}
+
+// The first monthly open Yahoo has for a ticker, the start for its All change.
+export async function firstPrice(symbol, kind) {
+  const months = await monthlyPrices(symbol, '2000-01-01', kind);
+  const first = Object.keys(months ?? {}).sort()[0];
+  return first ? { month: first, price: months[first][0] } : null;
 }
 
 /* ---------- splits and dividends: Yahoo Finance, through a reader that relays it ---------- */
@@ -339,6 +346,23 @@ async function closingBefore(from, days) {
     await new Promise(r => setTimeout(r, EVENT_GAP_MS));
   }
   return null;
+}
+
+// Each index's member symbols, from NSE's published lists. A list that can't be read
+// is left out, so the others still work.
+const MEMBER_LISTS = { nifty50: 'ind_nifty50list', next50: 'ind_niftynext50list', mid150: 'ind_niftymidcap150list' };
+export async function indexMembers() {
+  const out = {};
+  for (const [id, file] of Object.entries(MEMBER_LISTS)) {
+    const text = await relays[0](`https://nsearchives.nseindia.com/content/indices/${file}.csv`).catch(() => '');
+    const at = text.indexOf('Company Name,');
+    if (at < 0) continue;
+    // Names can hold commas, so the symbol is counted from the end: symbol, series, ISIN.
+    const symbols = text.slice(at).split('\n').slice(1).map(line => line.trim().split(',')).filter(c => c.length >= 5 && /^INE/.test(c.at(-1))).map(c => c.at(-3).trim());
+    if (symbols.length >= 40) out[id] = symbols;
+    await new Promise(r => setTimeout(r, EVENT_GAP_MS));
+  }
+  return out;
 }
 
 // Month to [open, close], in today's share units as Yahoo adjusts for splits.

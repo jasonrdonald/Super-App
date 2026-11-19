@@ -1120,7 +1120,8 @@ function applyTheme() {
   document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.remove());
   const meta = document.createElement('meta');
   meta.name = 'theme-color';
-  meta.content = sec ? sec.light : dark ? '#131416' : '#f5f3ee';
+  // The phone's status bar matches the page, as section headers now do.
+  meta.content = dark ? '#131416' : '#f5f3ee';
   document.head.append(meta);
 }
 

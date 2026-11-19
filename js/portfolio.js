@@ -340,7 +340,8 @@ export function buildPositions({ trades, holdings = [], market = [], own = [], f
 
 // The periods a change in value is shown over. 1D is the day's change; the rest come
 // from each quote's percentage change over the period.
-export const CHANGE_PERIODS = ['1d', '5d', '1m', '6m', 'ytd', '1y'];
+// All is since you bought: what today's holding has gained on its cost.
+export const CHANGE_PERIODS = ['1d', '5d', '1m', '6m', 'ytd', '1y', 'all'];
 
 // A stock quote saved before period changes were kept still has its own returns.
 const storedPerf = f => f && { '5d': f.perf1w, '1m': f.perf1m, '6m': f.perf6m, ytd: f.perfYtd, '1y': f.perf1y };
@@ -362,6 +363,7 @@ export function summarizePosition(p, quote) {
   // What today's holding gained over each period, as if held throughout it.
   const changes = Object.fromEntries(CHANGE_PERIODS.map(k => {
     if (k === '1d') return [k, dayGain];
+    if (k === 'all') return [k, gain];
     const start = quote?.starts?.[k];
     const pct = start > 0 && price ? (price / start - 1) * 100 : (quote?.perf ?? storedPerf(quote?.f))?.[k];
     return [k, value == null || !Number.isFinite(pct) || pct <= -100 ? null : value - value / (1 + pct / 100)];

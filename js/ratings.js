@@ -25,8 +25,23 @@ function qualityBand(l) {
   return share >= 0.75 ? 'High quality' : share >= 0.5 ? 'Medium quality' : 'Low quality';
 }
 
+// Which index each NSE symbol belongs to, set from NSE's lists when they're loaded.
+const INDEX_NAMES = { nifty50: 'Nifty 50', next50: 'Nifty Next 50', mid150: 'Nifty Midcap 150' };
+const UNCATEGORIZED = 'Uncategorized';
+let indexOf = new Map();
+export function setIndexMembers(members) {
+  indexOf = new Map(Object.entries(INDEX_NAMES).flatMap(([id, name]) => (members?.[id] ?? []).map(s => [s, name])));
+}
+export const indexMembersLoaded = () => indexOf.size > 0;
+
 export const GROUPINGS = {
   asset: { label: 'Asset type' },
+  index: {
+    label: 'Index',
+    order: [...Object.values(INDEX_NAMES), UNCATEGORIZED],
+    rule: 'Membership of Nifty 50, Nifty Next 50 and Nifty Midcap 150, from NSE\'s published lists, checked weekly. Everything else, including US stocks and smaller companies, is Uncategorized.',
+    band: l => indexOf.get(l.symbol) ?? UNCATEGORIZED,
+  },
   sector: { label: 'Sector', band: l => l.sector ?? UNRATED },
   cap: {
     label: 'Market cap',
