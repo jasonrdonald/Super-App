@@ -1550,7 +1550,7 @@ function groupTable(account, rows) {
     return `<td class="num ${col.tone ? tone(v) : ''}">${col.f(v, r)}${sub ? `<small>${sub}</small>` : ''}</td>`;
   };
   const totals = { xirr: total.xirr, cost: total.cost, value: total.value, dividends: total.dividends, dayGain: total.dayGain, dayPct: total.dayPct, gain: total.gain, gainPct: total.gainPct, realized: total.realized, realizedPct: total.realizedPct, periodChange: changeOf(total).amount };
-  return `<div class="holdings-wrap"><table class="holdings${tableView() === 'basic' ? ' pf-basic' : ''}">
+  return `<div class="holdings-wrap${tableView() === 'basic' ? ' pf-basic-wrap' : ''}"><table class="holdings${tableView() === 'basic' ? ' pf-basic' : ''}">
     <thead><tr>${COLS.map(columnHeader).join('')}</tr></thead>
     <tbody>${rows.map(r => {
       const owners = account ? [account] : r.holders;
