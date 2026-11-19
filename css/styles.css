@@ -1095,3 +1095,20 @@ th.num .pf-th { justify-content: flex-end; }
 .ret-upcoming li:last-child { border-bottom: 0; }
 .ret-up-date { color: var(--muted); font-size: .84rem; font-variant-numeric: tabular-nums; }
 .ret-upcoming .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Portfolio: links to its other pages, and the add-broker row under the brokers */
+.pf-links { display: flex; gap: 8px; margin: -2px 0 14px; overflow-x: auto; scrollbar-width: none; }
+.pf-links::-webkit-scrollbar { display: none; }
+.pf-link-chip { display: inline-flex; align-items: center; gap: 6px; flex: none; padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: .86rem; font-weight: 550; text-decoration: none; }
+.pf-link-chip:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.pf-link-chip .i { width: 15px; height: 15px; color: var(--accent); }
+.pf-add-row { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px; border: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--border)); border-radius: var(--radius); color: var(--accent); font-weight: 600; text-decoration: none; }
+.pf-add-row .i { width: 18px; height: 18px; }
+
+/* On phones the section icon gives way, so the title and header buttons fit. */
+@media (max-width: 480px) {
+  .topbar.hero .hero-icon { display: none; }
+  .topbar .icon-btn { flex: none; }
+  .topbar { gap: 2px; }
+  .topbar .titles h1, .topbar .titles p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+}

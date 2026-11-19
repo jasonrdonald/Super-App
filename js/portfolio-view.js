@@ -1150,16 +1150,47 @@ function bindRestore() {
 
 const fxNote = list => (list.some(isUsd) ? `<div class="status">${fxRate() ? `USD brokers are converted at ${perShare(fxRate())} to the dollar` : 'No USD rate yet, so USD brokers are left out of these totals'}${info('fx')}</div>` : '');
 
+// Icon buttons for a page's header: refresh, plus whatever else the page needs.
+const headButton = (act, glyph, label, id = '') => `<button class="icon-btn" data-act="${act}"${id ? ` data-id="${id}"` : ''} aria-label="${label}" title="${label}">${icon(glyph)}</button>`;
+const moreButton = (act, label, id = '') => headButton(act, 'more', label, id);
+
+// The Portfolio's other pages, as small links under the summary.
+const pageLinks = () => `<nav class="pf-links" aria-label="Portfolio pages">
+    ${[['consolidated', 'list', 'Consolidated'], ['reports', 'file', 'Reports'], ['analysis', 'chart', 'Analysis'], ['transfers', 'swap', 'Transfers']].map(([p, i, l]) => `<a class="pf-link-chip" href="${HOME}/${p}">${icon(i)}<span>${l}</span></a>`).join('')}
+  </nav>`;
+
+// Everything else on the Portfolio page sits in its header menu.
+async function homeMenu() {
+  const k = await A.choose('Portfolio', [
+    { icon: 'plus', label: 'Add broker account' },
+    { icon: 'download', label: 'Export PDF' },
+    { icon: 'download', label: 'Export Excel' },
+    { icon: 'download', label: 'Back up all brokers' },
+    { icon: 'upload', label: 'Import brokers from a backup' },
+    { icon: 'clock', label: 'Data imports' },
+    { icon: 'settings', label: 'Data sources' },
+  ]);
+  if (k === 0) return A.go(`${HOME}/add`);
+  if (k === 1) return exportPdf();
+  if (k === 2) return exportExcel();
+  if (k === 3) return saveBackup();
+  if (k === 4) return A.$('#pf-restore')?.click();
+  if (k === 5) return A.go(`${HOME}/imports`);
+  if (k === 6) return A.go(`${HOME}/data`);
+  return undefined;
+}
+
 function homeView(r) {
   const list = accounts();
-  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>${list.length ? `<a class="btn sm" href="${HOME}/consolidated">${icon('list')}<span>Consolidated</span></a><a class="btn sm" href="${HOME}/reports">${icon('file')}<span>Reports</span></a><a class="btn sm" href="${HOME}/transfers">${icon('swap')}<span>Transfers</span></a><button class="btn sm" data-act="pf-export">${icon('download')}<span>Export PDF</span></button><button class="btn sm" data-act="pf-excel">${icon('download')}<span>Export Excel</span></button>` : ''}`;
+  const add = `<a class="btn sm primary" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a>`;
   const body = list.length
     ? `<div class="pay-page pf-page">
         ${summaryStats(portfolioTotal())}
+        ${pageLinks()}
         ${tickerStrip()}
         <div class="status" id="pf-status">${statusLine()}</div>
         ${fxNote(list)}
-        ${backupButtons(add)}
+        <input id="pf-restore" type="file" accept=".json,application/json" hidden>
         <div class="rows pf-accounts">${list.map(a => {
           const { summary: s, held } = computed(a);
           const rupees = isUsd(a) && fxRate() ? money(s.value * fxRate()) : '';
@@ -1171,10 +1202,12 @@ function homeView(r) {
           </a>`;
           shown = CONFIG.currency;
           return card;
-        }).join('')}</div>
+        }).join('')}
+        <a class="pf-add-row" href="${HOME}/add">${icon('plus')}<span>Add broker account</span></a></div>
       </div>`
     : `<div class="empty">${icon('pie')}<p>Add a broker account for your stocks, mutual funds or crypto, then load its tradebooks.</p><div class="pf-start">${backupButtons(add)}</div></div>`;
-  A.view.innerHTML = `${hero('Portfolio', A.plural(list.length, 'broker account'), '#/')}
+  const tools = list.length ? `${headButton('pf-refresh', 'restore', 'Refresh prices')}${moreButton('pf-home-menu', 'Portfolio options')}` : '';
+  A.view.innerHTML = `${hero('Portfolio', A.plural(list.length, 'broker account'), '#/', tools)}
     <div class="scroll">${body}</div>`;
   bindRestore();
 }
@@ -1501,14 +1534,10 @@ function bindHoldings(table, again) {
 function accountView(r) {
   const account = accountById(r.id);
   const c = computed(account);
-  const tools = `${reconChip(account, c)}
-        <button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button>
-        <button class="btn sm" data-act="pf-export" data-id="${account.id}">${icon('download')}<span>Export PDF</span></button>
-        <button class="btn sm" data-act="pf-excel" data-id="${account.id}">${icon('download')}<span>Export Excel</span></button>
-        <label class="btn sm">${icon('upload')}<span>Load files</span><input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden></label>`;
+  const tools = `${reconChip(account, c)}<input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden>`;
   A.view.innerHTML = `
     ${hero(account.name, `${account.broker} · ${KINDS[account.kind]}${account.clientId ? ` · ${account.clientId}` : ''}`, HOME,
-      `<button class="icon-btn" data-act="pf-menu" data-id="${account.id}" aria-label="Account options">${icon('more')}</button>`)}
+      `${headButton('pf-load', 'upload', 'Load broker files')}${headButton('pf-refresh', 'restore', 'Refresh prices')}${moreButton('pf-menu', 'Account options', account.id)}`)}
     <div class="scroll"><div class="pay-page pf-page">
       ${tickerStrip(accountMarkets(account))}
       ${holdingsBody(account, c, { tools })}
@@ -1543,10 +1572,10 @@ function consolidatedView() {
   const c = { lines: consolidatedLines() };
   const held = c.lines.filter(l => l.qty > EPS).length;
   const count = new Set(c.lines.flatMap(l => l.holders.map(a => a.id))).size;
-  const tools = `<button class="btn sm" data-act="pf-refresh">${icon('restore')}<span>Refresh</span></button><button class="btn sm" data-act="pf-excel">${icon('download')}<span>Export Excel</span></button>`;
+  const tools = '';
   const summary = summaryOnly();
   A.view.innerHTML = `
-    ${hero('Consolidated portfolio', `${A.plural(held, 'holding')} · ${A.plural(count, 'broker')}`, HOME)}
+    ${hero('Consolidated portfolio', `${A.plural(held, 'holding')} · ${A.plural(count, 'broker')}`, HOME, `${headButton('pf-refresh', 'restore', 'Refresh prices')}${headButton('pf-excel', 'download', 'Export Excel')}`)}
     <div class="scroll"><div class="pay-page pf-page">
       ${holdingsBody(null, c, { filter: brokerFilter(list), notes: fxNote(list), tools, summary })}
     </div></div>`;
@@ -3676,10 +3705,21 @@ function tradeView(r) {
 
 async function accountMenu(id) {
   const account = accountById(id);
-  const k = await A.choose(account.name, [
+  const pick = await A.choose(account.name, [
+    { icon: 'upload', label: 'Load tradebooks and holdings files' },
+    { icon: 'plus', label: 'Add a transaction' },
+    { icon: 'check', label: 'Reconcile with the broker' },
+    { icon: 'download', label: 'Export PDF' },
+    { icon: 'download', label: 'Export Excel' },
     { icon: 'edit', label: 'Rename account' },
     { icon: 'trash', label: 'Delete account', danger: true },
   ]);
+  if (pick === 0) return A.$('#pf-files')?.click();
+  if (pick === 1) return A.go(`${accountPath(id)}/trade`);
+  if (pick === 2) return A.go(`${accountPath(id)}/reconcile`);
+  if (pick === 3) return exportPdf(id);
+  if (pick === 4) return exportExcel(id);
+  const k = pick == null ? null : pick - 5;
   if (k === 0) {
     const name = (await A.ask('Rename account', account.name))?.trim();
     if (!name) return;
@@ -3716,6 +3756,8 @@ export async function portfolioAction(b) {
   const { act, id, symbol } = b.dataset;
   switch (act) {
     case 'pf-menu': return accountMenu(id);
+    case 'pf-home-menu': return homeMenu();
+    case 'pf-load': return A.$('#pf-files')?.click();
     case 'pf-refresh': return refreshMarket(true);
     case 'pf-public-backup': return backupPublic();
     case 'pf-backup': return saveBackup();
