@@ -138,6 +138,12 @@ const basicColumns = () => [
   { ...COLUMNS.find(c => c.key === 'gain'), f: v => money(v, true, true), sub: r => (r.gainPct == null ? '' : pct(r.gainPct)) },
 ];
 const columns = () => (tableView() === 'basic' ? basicColumns() : [...COLUMNS.slice(0, 2), ...(mergedPage ? [BROKERS_COLUMN] : []), ...COLUMNS.slice(2), ...chosenColumns()]);
+// One icon button switches between the basic table and all columns.
+const viewToggle = () => {
+  const basic = tableView() === 'basic';
+  const label = basic ? 'Show all columns' : 'Show the basic view';
+  return `<button class="icon-btn pf-view-btn" data-act="pf-table-view" data-id="${basic ? 'all' : 'basic'}" aria-pressed="${!basic}" aria-label="${label}" title="${label}">${icon(basic ? 'expandH' : 'collapseH')}</button>`;
+};
 const valueOf = (col, r) => (col.get ? col.get(r) : r[col.key]);
 const columnOf = key => columns().find(c => c.key === key) ?? COLUMNS[0];
 
@@ -1448,8 +1454,23 @@ function holdingsTable(account, c) {
   const rows = rowsToShow(c);
   if (!rows.length) return `<div class="empty">${icon('card')}<p>${V.q ? 'No holdings match.' : 'No holdings here. Load a tradebook or add a transaction.'}</p></div>`;
   return bucketsOf(rows)
-    .map(([g, list]) => `<section class="pf-group"><h2>${A.esc(g)} (${list.length})</h2>${groupTable(account, list)}</section>`)
+    .map(([g, list]) => `<section class="pf-group"><h2>${A.esc(g)} (${list.length})</h2>${g === 'Stocks' && groupKey() === 'asset' ? indexSubgroups(account, list) : groupTable(account, list)}</section>`)
     .join('');
+}
+
+// Under Asset type, stocks split by index: Nifty 50, Next 50, Midcap 150, then the
+// rest. A single table stays as it was when they all fall in one, as with US stocks.
+function indexSubgroups(account, list) {
+  syncMembers();
+  const band = GROUPINGS.index.band;
+  const names = orderBands('index', new Set(list.map(band)));
+  if (names.length < 2) return groupTable(account, list);
+  const total = list.reduce((n, r) => n + (r.value ?? 0), 0);
+  return names.map(name => {
+    const part = list.filter(r => band(r) === name);
+    const value = part.reduce((n, r) => n + (r.value ?? 0), 0);
+    return `<div class="pf-subgroup"><h3>${A.esc(name)} <span class="muted">· ${part.length}${total ? ` · ${(value / total * 100).toFixed(1)}%` : ''}</span></h3>${groupTable(account, part)}</div>`;
+  }).join('');
 }
 
 function bucketsOf(rows) {
@@ -1505,7 +1526,7 @@ async function refreshMembers() {
     await db.put('market', saveMarket(MEMBERS_KEY, { name: 'Nifty index members', price: 0, members, quotedAt: t }));
     syncMembers();
     logImport({ category: 'public', source: 'Index members', what: 'Nifty 50, Next 50 and Midcap 150 lists', points: count, detail: Object.entries(members).map(([k, l]) => `${l.length} ${{ nifty50: 'Nifty 50', next50: 'Nifty Next 50', mid150: 'Nifty Midcap 150' }[k]}`).join(', '), dataTo: isoDay(t) });
-    if (groupKey() === 'index') redraw();
+    if (['index', 'asset'].includes(groupKey())) redraw();
   } catch {
     // Tried again on the next visit.
   } finally {
@@ -1533,8 +1554,10 @@ function groupTable(account, rows) {
     <thead><tr>${COLS.map(columnHeader).join('')}</tr></thead>
     <tbody>${rows.map(r => {
       const owners = account ? [account] : r.holders;
-      const details = owners.map(a => reviewDetails(a, r.symbol)).filter(Boolean).join(' · ');
-      const locked = owners.map(a => lockedLine(a, r.symbol)).filter(Boolean).join(' · ');
+      // Review and lock notes are details, so the basic view leaves them out.
+      const basic = tableView() === 'basic';
+      const details = basic ? '' : owners.map(a => reviewDetails(a, r.symbol)).filter(Boolean).join(' · ');
+      const locked = basic ? '' : owners.map(a => lockedLine(a, r.symbol)).filter(Boolean).join(' · ');
       return `<tr>
       <th scope="row"><a href="${accountPath(owners[0].id)}/h/${encodeURIComponent(r.symbol)}">${A.esc(r.symbol)}</a>${COLS[0].sub?.(r) ? `<small class="pf-row-name">${COLS[0].sub(r)}</small>` : ''}</th>
       ${COLS.slice(1).map(col => cell(col, r)).join('')}
@@ -1582,7 +1605,7 @@ function holdingsBody(account, c, { filter = '', notes = '', tools = '', summary
       <div class="pf-sort">
         <label for="pf-group">Group by</label>
         <select class="select" id="pf-group">${Object.entries(GROUPINGS).map(([k, g]) => `<option value="${k}"${k === groupKey() ? ' selected' : ''}>${g.label}</option>`).join('')}</select>
-        ${summary ? '' : `<div class="seg pf-view" role="group" aria-label="Columns">${[['basic', 'Basic'], ['all', 'All columns']].map(([k, l]) => `<button data-act="pf-table-view" data-id="${k}" aria-pressed="${tableView() === k}">${l}</button>`).join('')}</div>${tableView() === 'all' ? `<button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>` : ''}`}
+        ${summary ? '' : `${viewToggle()}${tableView() === 'all' ? `<button class="btn sm" data-act="pf-columns">${icon('columns')}<span>Columns</span></button>` : ''}`}
       </div>
       <div id="pf-table">${summary ? summaryTable(c) : holdingsTable(account, c)}</div>`;
 }
@@ -1600,7 +1623,7 @@ function bindHoldings(table, again) {
     draw();
   };
   A.$('#pf-sort')?.addEventListener('change', e => sortBy(e.target.value));
-  A.$('#pf-group').addEventListener('change', e => { A.ls.set('pfGroupBy', e.target.value); draw(); if (e.target.value === 'index') refreshMembers(); });
+  A.$('#pf-group').addEventListener('change', e => { A.ls.set('pfGroupBy', e.target.value); draw(); if (['index', 'asset'].includes(e.target.value)) refreshMembers(); });
   A.$('#pf-dir')?.addEventListener('click', () => { V.dir = -V.dir; draw(); });
   A.$('#pf-q')?.addEventListener('input', e => { V.q = e.target.value; draw(); });
   A.view.querySelectorAll('[data-show]').forEach(b => b.addEventListener('click', () => { V.show = b.dataset.show; again(); }));
@@ -3930,7 +3953,8 @@ export function portfolioView(r) {
   else homeView(r);
   // The strip's indices load at most once an hour, whenever a page showing it opens.
   if (A.$('.pf-tickers')) refreshTickers();
-  if (groupKey() === 'index') refreshMembers();
+  // The member lists feed both the Index grouping and Asset type's stock sub-groups.
+  if (['index', 'asset'].includes(groupKey())) refreshMembers();
   if (!A.S.brokerAccounts.length || !firstVisit) return;
   // Once per launch: picks up a stale market, or a load cut short by closing the app.
   firstVisit = false;

@@ -5,6 +5,9 @@ const PATHS = {
   more: 'M12 4.75a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 1 0 0-2.5zM12 10.75a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 1 0 0-2.5zM12 16.75a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 1 0 0-2.5z',
   dots: 'M5 12h.01M12 12h.01M19 12h.01',
   chevron: 'M9 18l6-6-6-6',
+  // Arrows out to widen a table to all its columns, and in to narrow it back.
+  expandH: 'M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4',
+  collapseH: 'M2 12h7M14 12h8M6 9l3 3-3 3M17 9l-3 3 3 3M11.5 6v12',
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM21 21l-4.3-4.3',
   book: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5',
   calendar: 'M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM16 2v4M8 2v4M3 10h18',

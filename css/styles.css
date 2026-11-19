@@ -1126,3 +1126,10 @@ th.num .pf-th { justify-content: flex-end; }
   .holdings.pf-basic thead .pf-info { display: none; }
   .holdings.pf-basic td small { font-size: .74rem; }
 }
+
+/* Index sub-groups inside Stocks, under the Asset type grouping. */
+.pf-subgroup { margin: 4px 0 14px; }
+.pf-subgroup h3 { margin: 10px 0 6px; font-size: .9rem; font-weight: 650; }
+.pf-subgroup h3 .muted { font-weight: 400; }
+.pf-view-btn { width: 38px; height: 38px; border: 1px solid var(--border); background: var(--surface); }
+.pf-view-btn[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
