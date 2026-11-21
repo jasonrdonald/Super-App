@@ -192,13 +192,17 @@ function settleDay(p, date, trades) {
     p.events.push({ kind: 'out', date, qty: -t.qty, origin: t.origin, source: t.note || undefined, tradeId: t.id, manual: t.manual, taken });
   }
   for (const s of sells) {
+    const taken = [];
     const short = takeFifo(p, s.left, (lot, take) => {
       p.realized.push({ buyDate: lot.date, sellDate: date, qty: take, cost: lot.price, price: s.t.price });
       s.gain += take * (s.t.price - lot.price);
+      taken.push({ date: lot.date, price: lot.price, qty: take, factor: lot.factor ?? 1 });
     });
     // Nothing left to match means the shares were bought before the tradebooks start.
     p.unmatched += short;
-    p.events.push({ kind: 'sell', date, qty: s.t.qty, price: s.t.price, exchange: s.t.exchange, origin: s.t.origin, tradeId: s.t.id, manual: s.t.manual, gain: s.gain, intraday: s.intraday, unmatched: short > EPS ? short : 0 });
+    // `taken` and `kept` let a report see which lots a sale used and which it left.
+    const kept = p.lots.map(l => ({ date: l.date, price: l.price, qty: l.qty, factor: l.factor ?? 1 }));
+    p.events.push({ kind: 'sell', date, qty: s.t.qty, price: s.t.price, exchange: s.t.exchange, origin: s.t.origin, tradeId: s.t.id, manual: s.t.manual, gain: s.gain, intraday: s.intraday, unmatched: short > EPS ? short : 0, taken, kept });
   }
 }
 
@@ -325,9 +329,49 @@ function issuesFor(named, holdings, actions, first, own) {
   return out;
 }
 
-export function buildPositions({ trades, holdings = [], market = [], own = [], fractional = false }) {
+// Takes `qty` off a list of trades, last first. False, changing nothing, if they
+// don't hold that much.
+function deduct(list, qty, left) {
+  if (list.reduce((n, t) => n + left.get(t), 0) < qty - 1e-6) return false;
+  let rest = qty;
+  for (const t of [...list].reverse()) {
+    const take = Math.min(left.get(t), rest);
+    left.set(t, left.get(t) - take);
+    rest -= take;
+  }
+  return true;
+}
+
+// Takes each cost reset's in-between trade out of the trades: the recent buys the
+// sale left, and that much of the sale. The long-held shares then stay with their
+// first cost and date. The trade's own result leaves with it, and is listed.
+function dropResets(named, state, us) {
+  const left = new Map(named.map(t => [t, t.qty]));
+  const dropped = [];
+  for (const p of state.values()) {
+    for (const x of basisResets(p, us)) {
+      const trial = new Map(left);
+      const sells = named.filter(t => t.symbol === p.symbol && t.side === 'sell' && t.date === x.date);
+      // Kept lots are in the shares of the sale's day, and trades in the shares of
+      // their own day, so a split in between is undone first.
+      const buys = x.tradeLots.map(l => ({ l, list: named.filter(t => t.symbol === p.symbol && t.side === 'buy' && t.date === l.date)
+        .sort((a, b) => Math.abs(b.price - (l.price * (l.factor ?? 1))) - Math.abs(a.price - (l.price * (l.factor ?? 1)))) }));
+      if (!deduct(sells, x.tradeQty, trial) || !buys.every(({ l, list }) => deduct(list, l.qty / (l.factor ?? 1), trial))) continue;
+      trial.forEach((v, k) => left.set(k, v));
+      const cost = costOf(x.tradeLots);
+      dropped.push({ symbol: p.symbol, date: x.date, qty: x.tradeQty, price: x.price, buys: x.tradeLots, cost, gain: x.tradeQty * x.price - cost });
+    }
+  }
+  const trades = named.map(t => (left.get(t) === t.qty ? t : { ...t, qty: left.get(t) })).filter(t => t.qty > EPS);
+  return { trades, dropped };
+}
+
+// `skipResets` leaves out the in-between trades behind cost resets, repeating
+// until none are left, as one taken out can show another. The trades left out are
+// on the result as `dropped`.
+export function buildPositions({ trades, holdings = [], market = [], own = [], fractional = false, skipResets = false }) {
   const map = symbolMap(trades, holdings);
-  const named = trades.map(t => {
+  let named = trades.map(t => {
     const symbol = map.get(t.symbol) ?? baseSymbol(t.symbol);
     return { ...t, symbol, origin: t.symbol };
   });
@@ -335,7 +379,17 @@ export function buildPositions({ trades, holdings = [], market = [], own = [], f
   // The account's own adjustments run last on a date, once everything else has landed.
   const actions = [...allActions(market), ...own];
   const issues = issuesFor(named, holdings, actions, replay(named, actions, [], fractional), own);
-  return replay(named, [...issues, ...actions], dividends, fractional);
+  let state = replay(named, [...issues, ...actions], dividends, fractional);
+  const dropped = [];
+  for (let pass = 0; skipResets && pass < 5; pass++) {
+    const out = dropResets(named, state, fractional);
+    if (!out.dropped.length) break;
+    dropped.push(...out.dropped);
+    named = out.trades;
+    state = replay(named, [...issues, ...actions], dividends, fractional);
+  }
+  state.dropped = dropped;
+  return state;
 }
 
 // The periods a change in value is shown over. 1D is the day's change; the rest come
@@ -536,6 +590,83 @@ export function cleanMarket(x) {
 /* ---------- reconciliation ---------- */
 
 // Compares the replay with the broker's holdings file, line by line.
+/* ---------- cost basis resets ---------- */
+
+// The date `years` before or after a 'YYYY-MM-DD' date.
+const shiftYears = (date, years) => `${Number(date.slice(0, 4)) + years}${date.slice(4)}`;
+
+// Takes `qty` from the end of a list of lots, newest last, keeping their order.
+function tail(lots, qty) {
+  const out = [];
+  let left = qty;
+  for (let i = lots.length - 1; i >= 0 && left > EPS; i--) {
+    const take = Math.min(lots[i].qty, left);
+    out.unshift({ ...lots[i], qty: take });
+    left -= take;
+  }
+  return out;
+}
+
+// Sales are matched to the oldest shares first. So when a long-term holding is
+// topped up for a short trade and that trade is sold, the sale takes the long-held
+// shares and leaves the new ones: the trade looks closed, but the holding now
+// carries the newer, usually higher, cost and a new purchase date.
+// Each reset says how many long-term shares went in place of recent ones: the
+// smaller of the long-term shares the sale took and the recent shares it left.
+// Had the sale taken the recent shares first, it would have used the newest of
+// them, and the oldest long-term shares would have gone anyway, so the shares
+// counted are the newest of the long-term ones taken.
+// A day's sales count together, as a later sale that day can take the recent
+// shares an earlier one left. `us` uses the 24-month long-term rule for US shares.
+export function basisResets(p, us = false) {
+  const years = us ? 2 : 1;
+  const longTerm = (buy, sell) => sell > shiftYears(buy, years);
+  const days = new Map();
+  for (const e of p.events) {
+    if (e.kind !== 'sell' || !e.taken) continue;
+    const d = days.get(e.date) ?? { date: e.date, taken: [], kept: [], sold: 0, proceeds: 0 };
+    const qty = e.qty - (e.intraday ?? 0);
+    d.taken.push(...e.taken);
+    d.kept = e.kept;
+    d.sold += qty;
+    d.proceeds += qty * e.price;
+    days.set(e.date, d);
+  }
+  const out = [];
+  for (const e of days.values()) {
+    if (!e.sold) continue;
+    e.price = e.proceeds / e.sold;
+    const old = e.taken.filter(l => longTerm(l.date, e.date));
+    const recent = e.kept.filter(l => !longTerm(l.date, e.date) && l.date <= e.date);
+    const qty = Math.min(qtyOf(old), qtyOf(recent));
+    if (qty <= EPS) continue;
+    const oldLots = tail(old, qty);
+    const newLots = tail(recent, qty);
+    // The whole in-between trade: as much of the sale as the recent shares held
+    // before it cover, newest first, whichever shares the sale actually took.
+    const recentAll = [...e.taken.filter(l => !longTerm(l.date, e.date)), ...recent].sort((a, b) => a.date.localeCompare(b.date));
+    const tradeQty = Math.min(e.sold, qtyOf(recentAll));
+    const tradeLots = tail(recentAll, tradeQty);
+    const oldCost = costOf(oldLots), newCost = costOf(newLots);
+    const lastNew = newLots.reduce((d, l) => (l.date > d ? l.date : d), '');
+    out.push({
+      symbol: p.symbol, date: e.date, price: e.price, qty, sold: e.sold,
+      oldLots, newLots, oldCost, newCost,
+      // The rise in the holding's cost, and the long-term gain this sale took.
+      costRaise: newCost - oldCost,
+      longGain: qty * e.price - oldCost,
+      // What the sale would have made on the recent shares instead.
+      shortGain: qty * e.price - newCost,
+      // The day the replacing shares count as long term again.
+      longAgain: shiftYears(lastNew, years),
+      // Whether the replacing shares are still held, going by purchase date.
+      held: newLots.some(n => p.lots.some(l => l.date === n.date)),
+      tradeQty, tradeLots,
+    });
+  }
+  return out;
+}
+
 export function reconcile(positions, holdings) {
   const out = [];
   const seen = new Set();

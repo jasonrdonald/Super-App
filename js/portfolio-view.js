@@ -2,7 +2,7 @@ import { icon } from './icons.js';
 import * as db from './db.js';
 import { CONFIG } from './config.js';
 import { shortAmounts, shortMoney } from './format.js';
-import { CHANGE_PERIODS, ISSUE_LABEL, xirr, costHeldAt, baseSymbol, allActions, buildPositions, summarizePosition, summarizeAll, reconcile, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
+import { CHANGE_PERIODS, ISSUE_LABEL, xirr, costHeldAt, baseSymbol, allActions, buildPositions, summarizePosition, summarizeAll, reconcile, basisResets, originalShares, splitTaken, cleanAccount, cleanTrade, cleanHoldingsFile, cleanAdjustment, cleanContract, cleanTransfer, cleanFee, cleanNote, cleanMarket } from './portfolio.js';
 import { parseBrokerFile } from './portfolio-import.js';
 import { stockQuotes, usQuotes, usdInr, stockEvents, monthlyPrices, indexValuations, monthEndValuations, sectorPes, fundMonths, fundQuote, fundCodes, fundNav, cryptoQuotes, cryptoStarts, listedSecurities, setOffline, marketTickers, MARKET_TICKERS, indexMembers, firstPrice, EVENT_GAP_MS } from './market.js';
 import { mergeMonths, publicFiles, applyPublicFiles, publicSummary, zipFiles, unzipFiles } from './public-data.js';
@@ -290,8 +290,11 @@ function grouper(account, rows, trades) {
   };
 }
 
-function computed(account) {
-  if (cache.has(account.id)) return cache.get(account.id);
+// `skipResets` leaves out the in-between trades behind cost resets, for reports
+// that want the long-held shares at their first cost.
+function computed(account, skipResets = false) {
+  const key = skipResets ? `${account.id}:skip` : account.id;
+  if (cache.has(key)) return cache.get(key);
   building.add(account.id);
   const file = holdingsOf(account.id);
   const rows = file?.rows ?? [];
@@ -304,6 +307,7 @@ function computed(account) {
     market,
     own: [...A.S.portfolioActions.filter(a => a.accountId === account.id), ...arrivals(account)],
     fractional: isUsd(account),
+    skipResets,
   });
   const lines = [...positions.values()]
     .filter(p => p.lots.length || p.realized.length || p.dividends || p.events.some(e => e.kind === 'allot'))
@@ -331,11 +335,11 @@ function computed(account) {
     });
   const held = lines.filter(l => l.qty > EPS);
   const result = {
-    positions, lines, held,
+    positions, lines, held, dropped: positions.dropped,
     summary: summarizeAll(lines),
     recon: rows.length ? reconcile(positions, rows) : null,
   };
-  cache.set(account.id, result);
+  cache.set(key, result);
   building.delete(account.id);
   return result;
 }
@@ -1637,20 +1641,37 @@ function bindHoldings(table, again) {
   });
 }
 
+// Whether broker pages leave out the in-between trades behind cost resets. Crypto
+// never does, as its gains are taxed the same however long it's held.
+const brokerSkip = () => A.ls.get('pfBrokerSkipResets', false);
+
+// The switch shows only where there's an in-between trade to leave out.
+function skipSwitch(account) {
+  if (account.kind === 'crypto' || !computed(account, true).dropped?.length) return '';
+  return `<label class="switch pf-detail" title="Leave out shares bought on top of a long-term holding and sold within a year, so the long-held shares keep their first cost"><input type="checkbox" id="pf-skip-resets"${brokerSkip() ? ' checked' : ''}><span>Leave out in-between trades</span></label>`;
+}
+
 function accountView(r) {
   const account = accountById(r.id);
-  const c = computed(account);
-  const tools = `${reconChip(account, c)}<input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden>`;
+  const skip = brokerSkip() && account.kind !== 'crypto';
+  const c = computed(account, skip);
+  const tools = `${reconChip(account, c)}${skipSwitch(account)}<input id="pf-files" type="file" multiple accept=".xlsx,.xls,.csv" hidden>`;
   A.view.innerHTML = `
     ${hero(account.name, `${account.broker} · ${KINDS[account.kind]}${account.clientId ? ` · ${account.clientId}` : ''}`, HOME,
       `${headButton('pf-load', 'upload', 'Load broker files')}${headButton('pf-refresh', 'restore', 'Refresh prices')}${moreButton('pf-menu', 'Account options', account.id)}`)}
     <div class="scroll"><div class="pay-page pf-page">
       ${tickerStrip(accountMarkets(account))}
-      ${holdingsBody(account, c, { tools })}
+      ${holdingsBody(account, c, { tools, notes: skip && c.dropped?.length ? droppedPanel([{ account, c, rate: 1 }]) : '' })}
       ${feesPanel(account, c)}
     </div></div>
     <a class="fab" href="${accountPath(account.id)}/trade" aria-label="Add transaction">${icon('plus')}</a>`;
-  bindHoldings(() => holdingsTable(account, computed(account)), () => accountView(r));
+  bindHoldings(() => holdingsTable(account, computed(account, skip)), () => accountView(r));
+  A.$('#pf-skip-resets')?.addEventListener('change', e => {
+    A.ls.set('pfBrokerSkipResets', e.target.checked);
+    const top = A.$('.scroll')?.scrollTop ?? 0;
+    accountView(r);
+    A.$('.scroll').scrollTop = top;
+  });
   A.$('#pf-files').addEventListener('change', async e => {
     const files = e.target.files;
     if (files.length) await loadFiles(account, files);
@@ -1740,7 +1761,7 @@ function disclosureView() {
 
 const R = { broker: 'all', year: 'all' };
 const ANALYSIS = { goals: 'Milestones', metrics: 'Metrics', rating: 'Rating' };
-const REPORTS = { timeline: 'Timeline', performance: 'Performance', dividends: 'Dividends', gains: 'Capital gains', earn: 'Crypto earnings', fees: 'Fees' };
+const REPORTS = { timeline: 'Timeline', performance: 'Performance', dividends: 'Dividends', gains: 'Capital gains', resets: 'Cost resets', earn: 'Crypto earnings', fees: 'Fees' };
 
 // Indian financial years run April to March, named by the year they start.
 const fyStart = date => Number(date.slice(0, 4)) - (date.slice(5, 7) < '04' ? 1 : 0);
@@ -1915,6 +1936,70 @@ function gainsReport() {
       <tbody>${rows.map(s => `<tr><td>${day(s.sellDate)}</td><td>${day(s.buyDate)}</td><td>${A.esc(s.symbol)}</td><td>${s.type}</td><td class="num">${qtyText(s.qty)}</td><td class="num">${perShare(s.costBasis / s.qty)}</td><td class="num">${perShare(s.proceeds / s.qty)}</td>${cellGain(s.gain)}</tr>`).join('')}</tbody>
     </table></div></details>`}
     <p class="muted small">Sells are matched to buys oldest first. Long term means held over 12 months, or over 24 for US shares. Excludes charges, and doesn't apply every tax rule, such as debt fund treatment, so check with your broker's tax statement before filing.</p>`;
+}
+
+/* ---------- cost resets ---------- */
+
+// Sales that took long-held shares in place of a recent top-up, because sales are
+// matched oldest first. Crypto is left out: its gains are taxed the same however
+// long it's held.
+const lotDates = lots => {
+  const dates = [...new Set(lots.map(l => l.date))].sort();
+  return dates.length === 1 ? day(dates[0]) : `${day(dates[0])} – ${day(dates.at(-1))} (${dates.length} buys)`;
+};
+
+function resetStatus(x) {
+  if (!x.held) return { text: 'Sold since', cls: '' };
+  const today = new Date().toISOString().slice(0, 10);
+  return today > x.longAgain ? { text: `Long term again after ${day(x.longAgain)}`, cls: 'up' } : { text: `Short term until ${day(x.longAgain)}`, cls: 'down' };
+}
+
+function resetsReport() {
+  const brokers = reportBrokers().filter(b => b.account.kind !== 'crypto');
+  const all = brokers.flatMap(({ account, c, rate }) => [...c.positions.values()].flatMap(p => basisResets(p, isUsd(account)).map(x => ({
+    ...x, account, rate,
+    oldCost: x.oldCost * rate, newCost: x.newCost * rate, costRaise: x.costRaise * rate, longGain: x.longGain * rate, shortGain: x.shortGain * rate,
+  }))));
+  const years = [...new Set(all.map(x => fyStart(x.date)))].sort((a, b) => b - a);
+  const filters = reportFilters(years);
+  const rows = all.filter(x => inYear(x.date)).sort((a, b) => b.date.localeCompare(a.date));
+  const sum = (list, key) => list.reduce((n, x) => n + x[key], 0);
+  const waiting = rows.filter(x => resetStatus(x).cls === 'down');
+  const byStock = new Map();
+  for (const x of rows) {
+    const key = `${x.account.id}:${x.symbol}`;
+    const row = byStock.get(key) ?? { symbol: x.symbol, account: x.account, count: 0, qty: 0, oldCost: 0, newCost: 0, costRaise: 0, longGain: 0 };
+    row.count++;
+    for (const k of ['qty', 'oldCost', 'newCost', 'costRaise', 'longGain']) row[k] += x[k];
+    byStock.set(key, row);
+  }
+  const cellGain = v => `<td class="num ${tone(v)}">${v ? money(v, true) : '–'}</td>`;
+  const stockLink = (account, symbol) => `<a class="pf-link" href="${accountPath(account.id)}/h/${encodeURIComponent(symbol)}">${A.esc(symbol)}</a>`;
+  const lotRows = (x, lots, label) => lots.map(l => `<tr><td>${day(x.date)}</td><td>${A.esc(x.symbol)}</td><td>${label}</td><td>${day(l.date)}</td><td class="num">${qtyText(l.qty)}</td><td class="num">${perShare(l.price * x.rate)}</td><td class="num">${money(l.qty * l.price * x.rate)}</td></tr>`).join('');
+  return `${filters}
+    <div class="stats">
+      ${stat(`Sales that reset cost${info('costResets')}`, String(rows.length), A.plural(byStock.size, 'holding'))}
+      ${stat('Cost basis raised', money(sum(rows, 'costRaise'), true), `${qtyText(sum(rows, 'qty'))} long-term shares replaced`, tone(-sum(rows, 'costRaise')))}
+      ${stat('Long-term gain taken', money(sum(rows, 'longGain'), true), `${money(sum(rows, 'shortGain'), true)} had the recent shares gone`, tone(sum(rows, 'longGain')))}
+      ${stat('Still short term', String(waiting.length), waiting.length ? `${money(sum(waiting, 'newCost'))} at the new cost` : 'Every reset is long term again', waiting.length ? 'down' : '')}
+    </div>
+    ${!rows.length ? `<div class="empty">${icon('file')}<p>No sale took long-term shares while newer ones stayed, for this selection.</p></div>` : `
+    <section class="panel"><h2>By holding</h2><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Stock</th><th>Broker</th><th class="num">Resets</th><th class="num">Shares</th><th class="num">Old cost</th><th class="num">New cost</th><th class="num">Cost raised</th><th class="num">Long-term gain taken</th></tr></thead>
+      <tbody>${[...byStock.values()].sort((a, b) => b.costRaise - a.costRaise).map(r => `<tr><td>${stockLink(r.account, r.symbol)}</td><td>${A.esc(r.account.name)}</td><td class="num">${r.count}</td><td class="num">${qtyText(r.qty)}</td><td class="num">${money(r.oldCost)}</td><td class="num">${money(r.newCost)}</td>${cellGain(r.costRaise)}${cellGain(r.longGain)}</tr>`).join('')}</tbody>
+    </table></div></section>
+    <section class="panel"><h2>Every reset (${rows.length})</h2><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Sold</th><th>Stock</th><th class="num">Shares</th><th class="num">Sold at</th><th>Long-term shares sold</th><th class="num">Their cost</th><th>Recent shares kept</th><th class="num">Their cost</th><th class="num">Cost raised</th><th>Kept shares now</th></tr></thead>
+      <tbody>${rows.map(x => {
+        const status = resetStatus(x);
+        return `<tr><td>${day(x.date)}</td><td>${stockLink(x.account, x.symbol)}</td><td class="num">${qtyText(x.qty)}${x.sold > x.qty + 1e-9 ? `<span class="muted small"> of ${qtyText(x.sold)}</span>` : ''}</td><td class="num">${perShare(x.price * x.rate)}</td><td>${lotDates(x.oldLots)}</td><td class="num">${perShare(x.oldCost / x.qty)}</td><td>${lotDates(x.newLots)}</td><td class="num">${perShare(x.newCost / x.qty)}</td>${cellGain(x.costRaise)}<td class="${status.cls}">${status.text}</td></tr>`;
+      }).join('')}</tbody>
+    </table></div></section>
+    ${detailed() ? `<details class="panel pf-details" open><summary>Lot by lot</summary><div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Sold</th><th>Stock</th><th>Lot</th><th>Bought</th><th class="num">Shares</th><th class="num">Cost per share</th><th class="num">Cost</th></tr></thead>
+      <tbody>${rows.map(x => lotRows(x, x.oldLots, 'Long-term, sold') + lotRows(x, x.newLots, 'Recent, kept')).join('')}</tbody>
+    </table></div></details>` : ''}`}
+    <p class="muted small">A sale is matched to the oldest shares first, the way Indian depositories and tax rules do it, and you can't pick which shares go. So when a long-term holding is topped up for a short trade and that trade is sold, the sale takes the long-held shares and the trade's shares stay: the holding's cost rises to the newer price and its holding period starts again. Each row counts the long-term shares the sale took in place of recent ones still held, up to the number of recent shares. Old cost is what those long-term shares cost, new cost what the recent shares that stayed cost. Long-term gain taken is the gain the sale made on the long-term shares, against what it would have made on the recent ones. Shares are in the units of the sale's day, before any later split or bonus. Excludes charges and is not a tax computation.</p>`;
 }
 
 // Interest from Earn contracts plus older rewards, by coin. Both are in coins, so
@@ -2699,15 +2784,37 @@ function perfTable(title, groups, indices, noIndex = [], growth = null, growthNo
   </table></div></section>`;
 }
 
+// Whether Performance leaves out the in-between trades behind cost resets.
+const skipResets = () => A.ls.get('pfPerfSkipResets', false);
+
+// The in-between trades left out, each with what it made or lost.
+function droppedPanel(brokers) {
+  const list = brokers.flatMap(({ account, c, rate }) => (c.dropped ?? []).map(d => ({ ...d, account, rate })))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  if (!list.length) return `<div class="banner">${icon('info')}<span>No in-between trades to leave out for this selection.</span></div>`;
+  const result = list.reduce((n, d) => n + d.gain * d.rate, 0);
+  return `<details class="panel pf-details"><summary>Left out ${A.plural(list.length, 'in-between trade')}, ${money(result, true)} between them</summary>
+    <p class="muted small chart-note">Each is shares bought on top of a long-term holding and sold within a year, which a sale matched oldest first would have taken from the long-held shares instead. With them left out, those shares keep their first cost and date, and the trades' own result is not in the figures here.</p>
+    <div class="holdings-wrap"><table class="holdings lots">
+      <thead><tr><th>Stock</th><th>Broker</th><th>Bought</th><th>Sold</th><th class="num">Shares</th><th class="num">Bought at</th><th class="num">Sold at</th><th class="num">Result</th></tr></thead>
+      <tbody>${list.map(d => `<tr><td>${A.esc(d.symbol)}</td><td>${A.esc(d.account.name)}</td><td>${lotDates(d.buys)}</td><td>${day(d.date)}</td><td class="num">${qtyText(d.qty)}</td><td class="num">${perShare(d.cost / d.qty * d.rate)}</td><td class="num">${perShare(d.price * d.rate)}</td><td class="num ${tone(d.gain)}">${money(d.gain * d.rate, true)}</td></tr>`).join('')}</tbody>
+    </table></div>
+    <p class="muted small">Shares and prices are in the units of the sale's day. See Cost resets for what each sale did to the holding.</p>
+  </details>`;
+}
+
 function performanceReport() {
-  const brokers = reportBrokers();
+  const skip = skipResets();
+  // Crypto is left out: its gains are taxed the same however long it's held.
+  const brokers = reportBrokers().map(b => (skip && b.account.kind !== 'crypto' ? { ...b, c: computed(b.account, true) } : b));
   const rows = brokers.flatMap(({ account, c, rate }) => c.lines.flatMap(l => {
     const type = perfType(account, l);
     return type ? [{ ...(rate === 1 ? l : inRupees(l, rate)), type, account }] : [];
   }));
   perfCharts.length = 0;
   const key = perfGroup();
-  const filters = reportFilters(null, `<label for="r-perf">Group by</label><select class="select" id="r-perf">${Object.entries(PERF_GROUPS).map(([k, label]) => `<option value="${k}"${k === key ? ' selected' : ''}>${label}</option>`).join('')}</select>`);
+  const filters = reportFilters(null, `<label for="r-perf">Group by</label><select class="select" id="r-perf">${Object.entries(PERF_GROUPS).map(([k, label]) => `<option value="${k}"${k === key ? ' selected' : ''}>${label}</option>`).join('')}</select>
+    <label class="switch pf-detail"><input type="checkbox" id="r-skip-resets"${skip ? ' checked' : ''}><span>Leave out in-between trades</span></label>`) + (skip ? droppedPanel(brokers) : '');
   if (!rows.length) return `${filters}<div class="empty">${icon('chart')}<p>Nothing to compare for this selection.</p></div>`;
   const byType = (...types) => types.map(t => [t, rows.filter(l => l.type === t)]).filter(([, list]) => list.length);
   const bands = list => orderBands(key, new Set(list.map(l => bandOf(key, l)))).map(b => [b, list.filter(l => bandOf(key, l) === b)]);
@@ -3135,7 +3242,7 @@ function reportsView(r) {
   const tabs = analysis ? ANALYSIS : REPORTS;
   const tab = tabs[r.tab] ? r.tab : analysis ? 'goals' : 'dividends';
   const goals = tab === 'goals' ? goalsPage() : null;
-  const body = goals ? goals.page() : tab === 'gains' ? gainsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : tab === 'timeline' ? timelineReport() : tab === 'performance' ? performanceReport() : tab === 'metrics' ? metricsReport() : tab === 'rating' ? ratingReport() : dividendReport();
+  const body = goals ? goals.page() : tab === 'gains' ? gainsReport() : tab === 'resets' ? resetsReport() : tab === 'earn' ? earnReport() : tab === 'fees' ? feesReport() : tab === 'timeline' ? timelineReport() : tab === 'performance' ? performanceReport() : tab === 'metrics' ? metricsReport() : tab === 'rating' ? ratingReport() : dividendReport();
   A.view.innerHTML = `
     ${hero(analysis ? 'Analysis' : 'Reports', tabs[tab], HOME)}
     <div class="seg tabs" role="group" aria-label="${analysis ? 'Analysis' : 'Report'}">
@@ -3187,6 +3294,7 @@ function reportsView(r) {
   A.$('#r-detail')?.addEventListener('change', e => { A.ls.set('pfReportDetail', e.target.checked); reportsView(r); });
   A.$('#r-perf')?.addEventListener('change', e => { A.ls.set('pfPerfGroup', e.target.value); reportsView(r); });
   A.$('#r-payers')?.addEventListener('change', e => { A.ls.set('pfPayersOnly', e.target.checked); reportsView(r); });
+  A.$('#r-skip-resets')?.addEventListener('change', e => { A.ls.set('pfPerfSkipResets', e.target.checked); reportsView(r); });
   A.$('#r-market')?.addEventListener('change', e => { A.ls.set('pfTimelineMarket', e.target.checked); reportsView(r); refreshMonthly(); });
 }
 
